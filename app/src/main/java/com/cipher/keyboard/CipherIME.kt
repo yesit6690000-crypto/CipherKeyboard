@@ -190,10 +190,9 @@ class CipherIME : InputMethodService() {
             text = "\u232B"
             setTextColor(Color.parseColor("#999999"))
             textSize = 14f
-            setBackgroundColor(Color.parseColor("#181818"))
-            layoutParams = LinearLayout.LayoutParams(0, dp(44), weight).also {
-                it.marginStart = dp(2); it.marginEnd = dp(2)
-            }
+            background = null
+            setBackgroundResource(android.R.drawable.list_selector_background)
+            layoutParams = LinearLayout.LayoutParams(0, dp(56), weight)
         }
         btn.setOnTouchListener { _, event ->
             when (event.action) {
@@ -230,8 +229,8 @@ class CipherIME : InputMethodService() {
             text = if (symbolsMode) "space" else "space (cipher)"
             setTextColor(Color.parseColor("#666666"))
             textSize = 12f
-            setBackgroundColor(Color.parseColor("#181818"))
-            layoutParams = LinearLayout.LayoutParams(0, dp(44), 5f).also { it.marginStart = dp(4); it.marginEnd = dp(4) }
+            setBackgroundResource(android.R.drawable.list_selector_background)
+            layoutParams = LinearLayout.LayoutParams(0, dp(56), 5f)
             setOnClickListener { commitPlain(" ") }
         }
         row.addView(space)
@@ -263,10 +262,8 @@ class CipherIME : InputMethodService() {
         val shown = if (capsOn) plainChar.uppercaseChar() else plainChar
         val cipherChar = CipherEngine.letterEncodeMap[plainChar] ?: plainChar
         val frame = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(0, dp(44), weight).also {
-                it.marginStart = dp(2); it.marginEnd = dp(2)
-            }
-            setBackgroundColor(Color.parseColor("#181818"))
+            layoutParams = LinearLayout.LayoutParams(0, dp(56), weight)
+            setBackgroundResource(android.R.drawable.list_selector_background)
         }
         frame.addView(TextView(this).apply {
             text = cipherChar.toString()
@@ -294,10 +291,8 @@ class CipherIME : InputMethodService() {
     private fun digitKey(digitChar: Char, weight: Float): View {
         val cipherChar = CipherEngine.digitEncodeMap[digitChar] ?: digitChar
         val frame = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(0, dp(44), weight).also {
-                it.marginStart = dp(2); it.marginEnd = dp(2)
-            }
-            setBackgroundColor(Color.parseColor("#181818"))
+            layoutParams = LinearLayout.LayoutParams(0, dp(56), weight)
+            setBackgroundResource(android.R.drawable.list_selector_background)
         }
         frame.addView(TextView(this).apply {
             text = cipherChar.toString()
@@ -325,10 +320,8 @@ class CipherIME : InputMethodService() {
             text = c.toString()
             setTextColor(Color.parseColor("#EEEEEE"))
             textSize = 17f
-            setBackgroundColor(Color.parseColor("#181818"))
-            layoutParams = LinearLayout.LayoutParams(0, dp(44), weight).also {
-                it.marginStart = dp(2); it.marginEnd = dp(2)
-            }
+            setBackgroundResource(android.R.drawable.list_selector_background)
+            layoutParams = LinearLayout.LayoutParams(0, dp(56), weight)
             setOnClickListener { commitPlain(c.toString()) }
         }
         return btn
@@ -339,10 +332,12 @@ class CipherIME : InputMethodService() {
             text = label
             setTextColor(if (accent) Color.parseColor("#111111") else Color.parseColor("#999999"))
             textSize = 14f
-            setBackgroundColor(if (accent) Color.parseColor("#E8763C") else Color.parseColor("#181818"))
-            layoutParams = LinearLayout.LayoutParams(0, dp(44), weight).also {
-                it.marginStart = dp(2); it.marginEnd = dp(2)
+            if (accent) {
+                setBackgroundColor(Color.parseColor("#E8763C"))
+            } else {
+                setBackgroundResource(android.R.drawable.list_selector_background)
             }
+            layoutParams = LinearLayout.LayoutParams(0, dp(56), weight)
             setOnClickListener { onClick() }
         }
     }
