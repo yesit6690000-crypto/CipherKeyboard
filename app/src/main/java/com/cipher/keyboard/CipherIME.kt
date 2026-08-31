@@ -36,6 +36,15 @@ class CipherIME : InputMethodService() {
     private val repeatHandler = Handler(Looper.getMainLooper())
     private var repeatRunnable: Runnable? = null
 
+    // auto-hide the plaintext recheck preview after a few seconds of showing it
+    private var previewHideRunnable: Runnable? = null
+    private val previewAutoHideMs = 8000L
+
+    // auto-clear the clipboard a while after we put cipher/plain text on it, so it doesn't linger
+    private val clipboardHandler = Handler(Looper.getMainLooper())
+    private var clipboardClearRunnable: Runnable? = null
+    private val clipboardAutoClearMs = 30000L
+
     // last clipboard text we already offered to decode, so we don't re-popup the same one every time
     private var lastSeenClip: String? = null
     private var clipListener: ClipboardManager.OnPrimaryClipChangedListener? = null
@@ -60,6 +69,7 @@ class CipherIME : InputMethodService() {
         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipListener?.let { cm.removePrimaryClipChangedListener(it) }
         repeatHandler.removeCallbacksAndMessages(null)
+        clipboardHandler.removeCallbacksAndMessages(null)
         keyboardRootView = null
     }
 
@@ -402,7 +412,19 @@ class CipherIME : InputMethodService() {
             previewText.text = "\u2022 ".repeat(minOf(composing.length, 24)).trim()
         } else {
             previewText.text = if (composing.isEmpty()) "type to see plain-text preview" else composing.toString()
+            schedulePreviewAutoHide() // typing while visible pushes the auto-hide timer back
         }
+    }
+
+    private fun schedulePreviewAutoHide() {
+        previewHideRunnable?.let { repeatHandler.removeCallbacks(it) }
+        val r = Runnable {
+            previewHidden = true
+            eyeIcon.text = "\u25CF"
+            updatePreviewText()
+        }
+        previewHideRunnable = r
+        repeatHandler.postDelayed(r, previewAutoHideMs)
     }
 
     private fun refreshPreviewNow() {
@@ -419,12 +441,39 @@ class CipherIME : InputMethodService() {
         previewHidden = !previewHidden
         eyeIcon.text = if (previewHidden) "\u25CF" else "\u25CB"
         updatePreviewText()
+        if (previewHidden) {
+            previewHideRunnable?.let { repeatHandler.removeCallbacks(it) }
+        }
     }
 
     // ---------- Clipboard tools ----------
 
     private fun performCopy() {
         currentInputConnection?.performContextMenuAction(android.R.id.copy)
+        scheduleClipboardAutoClear()
+    }
+
+    /**
+     * Wipes the clipboard a while after we last put cipher/plain text on it, so ciphertext
+     * (or its decoded plaintext) doesn't sit around for other apps to read. Only clears if the
+     * clipboard still holds exactly what we captured -- if the user copied something else in
+     * the meantime, we leave it alone.
+     */
+    private fun scheduleClipboardAutoClear() {
+        clipboardClearRunnable?.let { clipboardHandler.removeCallbacks(it) }
+        clipboardHandler.postDelayed({
+            val snapshot = readClipboardText()
+            if (snapshot.isEmpty()) return@postDelayed
+            val clearRunnable = Runnable {
+                if (readClipboardText() == snapshot) {
+                    val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    cm.setPrimaryClip(ClipData.newPlainText("", ""))
+                    Toast.makeText(this, "Clipboard auto-cleared", Toast.LENGTH_SHORT).show()
+                }
+            }
+            clipboardClearRunnable = clearRunnable
+            clipboardHandler.postDelayed(clearRunnable, clipboardAutoClearMs)
+        }, 250)
     }
 
     private fun performPaste() {
@@ -479,6 +528,7 @@ class CipherIME : InputMethodService() {
 
     /** Simple in-IME popup window rather than an Activity dialog, since IMEs can't easily launch dialogs. */
     private fun showDecodedDialog(decoded: String) {
+        scheduleClipboardAutoClear() // you've now seen the plaintext, no need to keep the ciphertext on the clipboard
         val anchor = keyboardRootView
         if (anchor == null || !anchor.isAttachedToWindow) {
             // Keyboard isn't actually on-screen right now (window has no valid token yet) --
