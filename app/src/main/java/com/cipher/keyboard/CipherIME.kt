@@ -30,6 +30,7 @@ class CipherIME : InputMethodService() {
 
     private lateinit var previewText: TextView
     private lateinit var eyeIcon: TextView
+    private var keyboardRootView: View? = null
 
     // repeat-delete while backspace is held down
     private val repeatHandler = Handler(Looper.getMainLooper())
@@ -48,11 +49,18 @@ class CipherIME : InputMethodService() {
         cm.addPrimaryClipChangedListener(clipListener)
     }
 
+    override fun onFinishInputView(finishingInput: Boolean) {
+        super.onFinishInputView(finishingInput)
+        repeatRunnable?.let { repeatHandler.removeCallbacks(it) }
+        repeatRunnable = null
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipListener?.let { cm.removePrimaryClipChangedListener(it) }
         repeatHandler.removeCallbacksAndMessages(null)
+        keyboardRootView = null
     }
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
@@ -77,6 +85,7 @@ class CipherIME : InputMethodService() {
         root.addView(spacer(6))
         root.addView(buildBottomRow())
 
+        keyboardRootView = root
         return root
     }
 
@@ -475,6 +484,13 @@ class CipherIME : InputMethodService() {
 
     /** Simple in-IME popup window rather than an Activity dialog, since IMEs can't easily launch dialogs. */
     private fun showDecodedDialog(decoded: String) {
+        val anchor = keyboardRootView
+        if (anchor == null || !anchor.isAttachedToWindow) {
+            // Keyboard isn't actually on-screen right now (window has no valid token yet) --
+            // showing a popup here would crash, so just surface it as a toast instead.
+            Toast.makeText(this, "Decoded: $decoded", Toast.LENGTH_LONG).show()
+            return
+        }
         val popup = android.widget.PopupWindow(this)
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -503,7 +519,13 @@ class CipherIME : InputMethodService() {
         popup.width = ViewGroup.LayoutParams.MATCH_PARENT
         popup.height = ViewGroup.LayoutParams.WRAP_CONTENT
         popup.isFocusable = true
-        popup.showAtLocation(box, Gravity.TOP, 0, dp(40))
+        try {
+            popup.showAtLocation(anchor, Gravity.TOP, 0, dp(40))
+        } catch (e: Exception) {
+            // Window token became invalid between the check above and this call (rare race) --
+            // fail safe instead of crashing the keyboard.
+            Toast.makeText(this, "Decoded: $decoded", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun dp(v: Int): Int = TypedValue.applyDimension(
