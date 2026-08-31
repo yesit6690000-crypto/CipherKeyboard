@@ -6,11 +6,15 @@ import android.content.Context
 import android.graphics.Color
 import android.graphics.Typeface
 import android.inputmethodservice.InputMethodService
+import android.os.Handler
+import android.os.Looper
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -27,6 +31,37 @@ class CipherIME : InputMethodService() {
     private lateinit var previewText: TextView
     private lateinit var eyeIcon: TextView
 
+    // repeat-delete while backspace is held down
+    private val repeatHandler = Handler(Looper.getMainLooper())
+    private var repeatRunnable: Runnable? = null
+
+    // last clipboard text we already offered to decode, so we don't re-popup the same one every time
+    private var lastSeenClip: String? = null
+    private var clipListener: ClipboardManager.OnPrimaryClipChangedListener? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipListener = ClipboardManager.OnPrimaryClipChangedListener {
+            maybeAutoOfferDecode()
+        }
+        cm.addPrimaryClipChangedListener(clipListener)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipListener?.let { cm.removePrimaryClipChangedListener(it) }
+        repeatHandler.removeCallbacksAndMessages(null)
+    }
+
+    override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
+        super.onStartInputView(info, restarting)
+        // Android blocks background apps from reading the clipboard (privacy rule since Android 10),
+        // so the most reliable "live" moment is right when you come back to type -- check here too.
+        maybeAutoOfferDecode()
+    }
+
     override fun onCreateInputView(): View {
         composing = StringBuilder()
         val root = LinearLayout(this).apply {
@@ -35,7 +70,7 @@ class CipherIME : InputMethodService() {
             setPadding(dp(6), dp(8), dp(6), dp(6))
         }
 
-        root.addView(buildClipboardRow())
+        root.addView(buildToolbarRow())
         root.addView(buildPreviewRow())
         root.addView(spacer(6))
         root.addView(if (symbolsMode) buildSymbolRows() else buildLetterRows())
@@ -47,14 +82,15 @@ class CipherIME : InputMethodService() {
 
     // ---------- Row builders ----------
 
-    private fun buildClipboardRow(): View {
+    private fun buildToolbarRow(): View {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            weightSum = 4f
+            weightSum = 5f
         }
+        row.addView(smallButton("Kbd") { switchToNextKeyboard() })
         row.addView(smallButton("Copy") { performCopy() })
         row.addView(smallButton("Paste") { performPaste() })
-        row.addView(smallButton("Select all") { performSelectAll() })
+        row.addView(smallButton("All") { performSelectAll() })
         row.addView(smallButton("Decode") { showDecodePopup() })
         return row
     }
@@ -120,7 +156,7 @@ class CipherIME : InputMethodService() {
         for (c in CipherEngine.row3Plain) {
             lastRow.addView(letterKey(c, weight = 1f))
         }
-        lastRow.addView(controlKey("\u232B", weight = 1.4f) { doBackspace() })
+        lastRow.addView(backspaceKey(weight = 1.4f))
         col.addView(lastRow)
 
         return col
@@ -134,9 +170,45 @@ class CipherIME : InputMethodService() {
         col.addView(plainKeyRow(punctRow1))
         val lastRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         for (c in punctRow2) lastRow.addView(plainKey(c, weight = 1f))
-        lastRow.addView(controlKey("\u232B", weight = 1.4f) { doBackspace() })
+        lastRow.addView(backspaceKey(weight = 1.4f))
         col.addView(lastRow)
         return col
+    }
+
+    /** Backspace with hold-to-repeat: single tap deletes one char, holding deletes repeatedly until released. */
+    private fun backspaceKey(weight: Float): View {
+        val btn = Button(this).apply {
+            text = "\u232B"
+            setTextColor(Color.parseColor("#999999"))
+            textSize = 14f
+            setBackgroundColor(Color.parseColor("#181818"))
+            layoutParams = LinearLayout.LayoutParams(0, dp(44), weight).also {
+                it.marginStart = dp(2); it.marginEnd = dp(2)
+            }
+        }
+        btn.setOnTouchListener { _, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    doBackspace() // immediate first delete
+                    val r = object : Runnable {
+                        override fun run() {
+                            doBackspace()
+                            repeatHandler.postDelayed(this, 50)
+                        }
+                    }
+                    repeatRunnable = r
+                    repeatHandler.postDelayed(r, 400) // wait a beat before repeating
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    repeatRunnable?.let { repeatHandler.removeCallbacks(it) }
+                    repeatRunnable = null
+                    true
+                }
+                else -> false
+            }
+        }
+        return btn
     }
 
     private fun buildBottomRow(): View {
@@ -359,11 +431,13 @@ class CipherIME : InputMethodService() {
         currentInputConnection?.performContextMenuAction(android.R.id.selectAll)
     }
 
-    private fun showDecodePopup() {
-        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        val clip = cm.primaryClip
-        val text = if (clip != null && clip.itemCount > 0) clip.getItemAt(0).coerceToText(this).toString() else ""
+    private fun switchToNextKeyboard() {
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        imm.showInputMethodPicker()
+    }
 
+    private fun showDecodePopup() {
+        val text = readClipboardText()
         if (text.isEmpty()) {
             Toast.makeText(this, "Clipboard is empty. Copy their cipher text first.", Toast.LENGTH_SHORT).show()
             return
@@ -372,8 +446,31 @@ class CipherIME : InputMethodService() {
             Toast.makeText(this, "Clipboard text doesn't look encoded.", Toast.LENGTH_SHORT).show()
             return
         }
-        val decoded = CipherEngine.decode(text)
-        showDecodedDialog(decoded)
+        lastSeenClip = text
+        showDecodedDialog(CipherEngine.decode(text))
+    }
+
+    /**
+     * Called whenever the clipboard changes AND every time the keyboard opens.
+     * If the new clipboard content is cipher text we haven't already shown, pop the decoded
+     * popup automatically -- no need to tap Decode. True always-on background listening isn't
+     * possible on modern Android (clipboard reads are blocked while an app isn't focused), so
+     * "keyboard becomes visible" is the closest reliable substitute for live.
+     */
+    private fun maybeAutoOfferDecode() {
+        val text = readClipboardText()
+        if (text.isEmpty() || text == lastSeenClip) return
+        if (!CipherEngine.looksEncoded(text)) return
+        lastSeenClip = text
+        showDecodedDialog(CipherEngine.decode(text))
+    }
+
+    private fun readClipboardText(): String {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val clip = cm.primaryClip
+        return if (clip != null && clip.itemCount > 0) {
+            try { clip.getItemAt(0).coerceToText(this).toString() } catch (e: Exception) { "" }
+        } else ""
     }
 
     /** Simple in-IME popup window rather than an Activity dialog, since IMEs can't easily launch dialogs. */
