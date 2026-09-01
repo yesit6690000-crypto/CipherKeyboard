@@ -288,9 +288,9 @@ class CipherIME : InputMethodService() {
             setTextColor(Color.parseColor("#666666"))
             textSize = 12f
             background = greyKeyBackground()
-            layoutParams = LinearLayout.LayoutParams(0, dp(60), 5f).also {
-                it.marginStart = dp(3); it.marginEnd = dp(3)
-                it.topMargin = dp(3); it.bottomMargin = dp(3)
+            layoutParams = LinearLayout.LayoutParams(0, dp(50), 5f).also {
+                it.marginStart = dp(2); it.marginEnd = dp(2)
+                it.topMargin = dp(2); it.bottomMargin = dp(2)
             }
             setOnClickListener { commitPlain(" ") }
         }
@@ -425,22 +425,11 @@ class CipherIME : InputMethodService() {
                 it.topMargin = dp(3); it.rightMargin = dp(4)
             }
         })
-        frame.setOnTouchListener { view, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    // Commit on touch-down rather than waiting for a full click (touch-up +
-                    // Android's click processing) -- this is what was reading as "slow" typing.
-                    view.isPressed = true
-                    val outChar = CipherEngine.letterEncodeMap[plainChar] ?: plainChar
-                    commitCipherChar(outChar, plainChar.toString().let { if (capsOn) it.uppercase() else it })
-                    true
-                }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    view.isPressed = false
-                    true
-                }
-                else -> false
-            }
+        frame.setOnClickListener { view ->
+            val outChar = CipherEngine.letterEncodeMap[plainChar] ?: plainChar
+            val outLabel = plainChar.toString().let { if (capsOn) it.uppercase() else it }
+            commitCipherChar(outChar, outLabel)
+            showKeyPreview(view, outChar.toString())
         }
         return frame
     }
@@ -467,21 +456,62 @@ class CipherIME : InputMethodService() {
                 it.topMargin = dp(3); it.rightMargin = dp(4)
             }
         })
-        frame.setOnTouchListener { view, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    view.isPressed = true
-                    commitCipherChar(cipherChar, digitChar.toString())
-                    true
-                }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    view.isPressed = false
-                    true
-                }
-                else -> false
-            }
+        frame.setOnClickListener { view ->
+            commitCipherChar(cipherChar, digitChar.toString())
+            showKeyPreview(view, cipherChar.toString())
         }
         return frame
+    }
+
+    // ---------- Key-press preview bubble ----------
+
+    private var keyPreviewPopup: android.widget.PopupWindow? = null
+    private var keyPreviewText: TextView? = null
+    private var keyPreviewHideRunnable: Runnable? = null
+
+    /** Briefly shows a bubble above the tapped key with the character that was typed. */
+    private fun showKeyPreview(anchor: View, char: String) {
+        try {
+            var popup = keyPreviewPopup
+            var textView = keyPreviewText
+            if (popup == null || textView == null) {
+                textView = TextView(this).apply {
+                    textSize = 24f
+                    setTextColor(Color.parseColor("#EEEEEE"))
+                    gravity = Gravity.CENTER
+                    background = android.graphics.drawable.GradientDrawable().apply {
+                        cornerRadius = dp(8).toFloat()
+                        setColor(Color.parseColor("#3D3D3D"))
+                    }
+                    setPadding(dp(12), dp(8), dp(12), dp(8))
+                }
+                popup = android.widget.PopupWindow(
+                    textView, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    isFocusable = false
+                    isTouchable = false
+                    isClippingEnabled = false
+                }
+                keyPreviewPopup = popup
+                keyPreviewText = textView
+            }
+            textView.text = char
+            val loc = IntArray(2)
+            anchor.getLocationInWindow(loc)
+            val x = loc[0] + anchor.width / 2 - dp(20)
+            val y = loc[1] - dp(48)
+            if (popup.isShowing) {
+                popup.update(x, y, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            } else {
+                popup.showAtLocation(anchor, Gravity.NO_GRAVITY, x, y)
+            }
+            keyPreviewHideRunnable?.let { repeatHandler.removeCallbacks(it) }
+            val hideRunnable = Runnable { try { popup.dismiss() } catch (e: Exception) {} }
+            keyPreviewHideRunnable = hideRunnable
+            repeatHandler.postDelayed(hideRunnable, 200)
+        } catch (e: Exception) {
+            // preview is purely cosmetic -- never let it interfere with actual typing
+        }
     }
 
     /** A plain (non-ciphered) key, used for punctuation which the user said doesn't need hiding. */
@@ -550,10 +580,10 @@ class CipherIME : InputMethodService() {
         }
     }
 
-    private fun keyMargins(weight: Float, heightDp: Int = 60): LinearLayout.LayoutParams {
+    private fun keyMargins(weight: Float, heightDp: Int = 50): LinearLayout.LayoutParams {
         return LinearLayout.LayoutParams(0, dp(heightDp), weight).also {
-            it.marginStart = dp(3); it.marginEnd = dp(3)
-            it.topMargin = dp(3); it.bottomMargin = dp(3)
+            it.marginStart = dp(2); it.marginEnd = dp(2)
+            it.topMargin = dp(2); it.bottomMargin = dp(2)
         }
     }
 
