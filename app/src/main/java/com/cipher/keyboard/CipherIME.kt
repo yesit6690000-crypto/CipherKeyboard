@@ -3,6 +3,7 @@ package com.cipher.keyboard
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.inputmethodservice.InputMethodService
@@ -27,6 +28,7 @@ class CipherIME : InputMethodService() {
     private var symbolsMode = false
     private var emojiMode = false
     private var clipHistoryMode = false
+    private var aesMode = false
     private var previewHidden = true
     private var composing = StringBuilder() // tracks plain-text of the current typed run for recheck preview
 
@@ -51,6 +53,11 @@ class CipherIME : InputMethodService() {
     private val clipHistoryPrefsName = "cipher_clip_history"
     private val clipHistoryKey = "items"
     private val clipHistoryMax = 100
+
+    // shared AES passphrase, stored locally only (never leaves the device -- no INTERNET permission
+    // exists in this app at all). Not hardware-backed encryption, just this app's private storage.
+    private val aesPrefsName = "cipher_aes_prefs"
+    private val aesPassphraseKey = "passphrase"
 
     // last clipboard text we already offered to decode, so we don't re-popup the same one every time
     private var lastSeenClip: String? = null
@@ -122,8 +129,8 @@ class CipherIME : InputMethodService() {
         } else if (clipHistoryMode) {
             root.addView(buildClipHistoryPanel())
         } else {
-            root.addView(buildToolbarRow())
-            root.addView(buildPreviewRow())
+            root.addView(if (aesMode) buildAesToolbarRow() else buildToolbarRow())
+            root.addView(if (aesMode) buildAesStatusRow() else buildPreviewRow())
             root.addView(spacer(6))
             root.addView(if (symbolsMode) buildSymbolRows() else buildLetterRows())
             root.addView(spacer(6))
@@ -139,15 +146,121 @@ class CipherIME : InputMethodService() {
     private fun buildToolbarRow(): View {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            weightSum = 6f
+            weightSum = 7f
         }
         row.addView(smallButton("Kbd") { switchToNextKeyboard() })
         row.addView(smallButton("Copy") { performCopy() })
         row.addView(smallButton("Paste") { performPaste() })
         row.addView(smallButton("All") { performSelectAll() })
         row.addView(smallButton("Clip") { clipHistoryMode = true; refreshKeyboardView() })
+        row.addView(smallButton("AES") { aesMode = true; refreshKeyboardView() })
         row.addView(smallButton("Decode") { showDecodePopup() })
         return row
+    }
+
+    private fun buildAesToolbarRow(): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            weightSum = 4f
+        }
+        row.addView(smallButton("\u2190 Cipher") { aesMode = false; refreshKeyboardView() })
+        row.addView(smallButton("Key") { showPassphrasePopup() })
+        row.addView(smallButton("Encrypt") { encryptCurrentFieldWithAes() })
+        row.addView(smallButton("Decode") { showDecodePopup() })
+        return row
+    }
+
+    /** Small status strip shown in AES mode instead of the substitution-cipher recheck bar. */
+    private fun buildAesStatusRow(): View {
+        val row = FrameLayout(this).apply {
+            background = android.graphics.drawable.GradientDrawable().apply {
+                cornerRadius = dp(10).toFloat()
+                setColor(Color.parseColor("#161616"))
+            }
+            setPadding(dp(12), dp(8), dp(10), dp(8))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(38)
+            ).also { it.topMargin = dp(6) }
+        }
+        val hasPassphrase = !getStoredPassphrase().isNullOrEmpty()
+        row.addView(TextView(this).apply {
+            text = if (hasPassphrase) {
+                "AES mode -- typing plain text. Tap Encrypt before sending."
+            } else {
+                "AES mode -- set a shared passphrase first (tap Key)"
+            }
+            setTextColor(if (hasPassphrase) Color.parseColor("#888888") else Color.parseColor("#E8763C"))
+            textSize = 12f
+            isSingleLine = true
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            gravity = Gravity.START or Gravity.CENTER_VERTICAL
+        })
+        return row
+    }
+
+    private fun getStoredPassphrase(): String? {
+        return try {
+            getSharedPreferences("cipher_settings", Context.MODE_PRIVATE)
+                .getString("passphrase", null)?.takeIf { it.isNotEmpty() }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Setting a passphrase from inside the IME's own popup isn't practical (an editable text
+     * field inside a keyboard's own popup, with the keyboard itself as the only way to type into
+     * it, is a reliability trap on most Android versions) -- so this just opens the app's proper
+     * settings screen instead, which already has a normal, safe EditText for it.
+     */
+    private fun showPassphrasePopup() {
+        try {
+            val intent = Intent(this, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+            Toast.makeText(this, "Set your shared passphrase, then come back and switch keyboards", Toast.LENGTH_LONG).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Open the Cipher Keyboard app to set a passphrase", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /**
+     * Encrypts everything currently typed (tracked via `composing`, which is what AES-mode keys
+     * commit as real plain text) and replaces the ENTIRE contents of the focused field with the
+     * resulting AES ciphertext -- this is a whole-message operation, not per-keystroke, since AES
+     * doesn't work as a 1-to-1 letter substitution the way the cipher keyboard does.
+     */
+    private fun encryptCurrentFieldWithAes() {
+        val passphrase = getStoredPassphrase()
+        if (passphrase.isNullOrEmpty()) {
+            Toast.makeText(this, "Set a shared passphrase first (tap Key)", Toast.LENGTH_LONG).show()
+            return
+        }
+        val plaintext = composing.toString()
+        if (plaintext.isBlank()) {
+            Toast.makeText(this, "Type your message first, then tap Encrypt", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val ic = currentInputConnection
+        if (ic == null) {
+            Toast.makeText(this, "No text field is focused", Toast.LENGTH_SHORT).show()
+            return
+        }
+        try {
+            val encrypted = AesEngine.encrypt(plaintext, passphrase)
+            val beforeLen = ic.getTextBeforeCursor(10000, 0)?.length ?: 0
+            val afterLen = ic.getTextAfterCursor(10000, 0)?.length ?: 0
+            ic.beginBatchEdit()
+            ic.deleteSurroundingText(beforeLen, afterLen)
+            ic.commitText(encrypted, 1)
+            ic.endBatchEdit()
+            composing = StringBuilder()
+            updatePreviewText()
+            Toast.makeText(this, "Encrypted -- ready to send", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Encryption failed, nothing was changed", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun buildPreviewRow(): View {
@@ -542,27 +655,37 @@ class CipherIME : InputMethodService() {
             layoutParams = keyMargins(weight)
             background = greyKeyBackground()
         }
-        frame.addView(TextView(this).apply {
-            text = cipherChar.toString()
+        val mainLabel = TextView(this).apply {
+            text = if (aesMode) shown.toString() else cipherChar.toString()
             setTextColor(Color.parseColor("#EEEEEE"))
             textSize = 19f
             gravity = Gravity.CENTER
             layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-        })
-        frame.addView(TextView(this).apply {
-            text = shown.toString()
-            setTextColor(Color.parseColor("#5A5A5A"))
-            textSize = 9f
-            layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).also {
-                it.gravity = Gravity.TOP or Gravity.END
-                it.topMargin = dp(3); it.rightMargin = dp(4)
-            }
-        })
+        }
+        frame.addView(mainLabel)
+        if (!aesMode) {
+            frame.addView(TextView(this).apply {
+                text = shown.toString()
+                setTextColor(Color.parseColor("#5A5A5A"))
+                textSize = 9f
+                layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).also {
+                    it.gravity = Gravity.TOP or Gravity.END
+                    it.topMargin = dp(3); it.rightMargin = dp(4)
+                }
+            })
+        }
         frame.setOnClickListener { view ->
-            val outChar = CipherEngine.letterEncodeMap[plainChar] ?: plainChar
             val outLabel = plainChar.toString().let { if (capsOn) it.uppercase() else it }
-            commitCipherChar(outChar, outLabel)
-            showKeyPreview(view, outLabel) // show the plain English letter, not the cipher glyph
+            if (aesMode) {
+                // AES mode types real plain text -- the whole point is to encrypt the readable
+                // message as a single block, not scramble individual letters as you go.
+                commitPlain(outLabel)
+                showKeyPreview(view, outLabel)
+            } else {
+                val outChar = CipherEngine.letterEncodeMap[plainChar] ?: plainChar
+                commitCipherChar(outChar, outLabel)
+                showKeyPreview(view, outLabel) // show the plain English letter, not the cipher glyph
+            }
         }
         return frame
     }
@@ -574,23 +697,29 @@ class CipherIME : InputMethodService() {
             background = greyKeyBackground()
         }
         frame.addView(TextView(this).apply {
-            text = cipherChar.toString()
+            text = if (aesMode) digitChar.toString() else cipherChar.toString()
             setTextColor(Color.parseColor("#EEEEEE"))
             textSize = 19f
             gravity = Gravity.CENTER
             layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         })
-        frame.addView(TextView(this).apply {
-            text = digitChar.toString()
-            setTextColor(Color.parseColor("#5A5A5A"))
-            textSize = 9f
-            layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).also {
-                it.gravity = Gravity.TOP or Gravity.END
-                it.topMargin = dp(3); it.rightMargin = dp(4)
-            }
-        })
+        if (!aesMode) {
+            frame.addView(TextView(this).apply {
+                text = digitChar.toString()
+                setTextColor(Color.parseColor("#5A5A5A"))
+                textSize = 9f
+                layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).also {
+                    it.gravity = Gravity.TOP or Gravity.END
+                    it.topMargin = dp(3); it.rightMargin = dp(4)
+                }
+            })
+        }
         frame.setOnClickListener { view ->
-            commitCipherChar(cipherChar, digitChar.toString())
+            if (aesMode) {
+                commitPlain(digitChar.toString())
+            } else {
+                commitCipherChar(cipherChar, digitChar.toString())
+            }
             showKeyPreview(view, digitChar.toString()) // show the plain digit, not the cipher glyph
         }
         return frame
@@ -917,7 +1046,22 @@ class CipherIME : InputMethodService() {
     private fun showDecodePopup() {
         val text = readClipboardText()
         if (text.isEmpty()) {
-            Toast.makeText(this, "Clipboard is empty. Copy their cipher text first.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Clipboard is empty. Copy their encoded text first.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (AesEngine.looksEncrypted(text)) {
+            val passphrase = getStoredPassphrase()
+            if (passphrase.isNullOrEmpty()) {
+                Toast.makeText(this, "This is AES-encrypted -- set your shared passphrase first (tap Key)", Toast.LENGTH_LONG).show()
+                return
+            }
+            lastSeenClip = text
+            val decoded = AesEngine.decrypt(text, passphrase)
+            if (decoded == null) {
+                Toast.makeText(this, "Couldn't decrypt -- wrong passphrase?", Toast.LENGTH_LONG).show()
+            } else {
+                showDecodedDialog(decoded)
+            }
             return
         }
         if (!CipherEngine.looksEncoded(text)) {
@@ -938,6 +1082,13 @@ class CipherIME : InputMethodService() {
     private fun maybeAutoOfferDecode() {
         val text = readClipboardText()
         if (text.isEmpty() || text == lastSeenClip) return
+        if (AesEngine.looksEncrypted(text)) {
+            val passphrase = getStoredPassphrase() ?: return // no passphrase set yet -- stay silent rather than nag on every clipboard change
+            lastSeenClip = text
+            val decoded = AesEngine.decrypt(text, passphrase) ?: return // wrong passphrase -- only report that on an explicit Decode tap, not on every auto-check
+            showDecodedDialog(decoded)
+            return
+        }
         if (!CipherEngine.looksEncoded(text)) return
         lastSeenClip = text
         showDecodedDialog(CipherEngine.decode(text))
