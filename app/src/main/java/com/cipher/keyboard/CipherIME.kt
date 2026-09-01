@@ -233,6 +233,7 @@ class CipherIME : InputMethodService() {
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
                     doBackspace() // immediate first delete
+                    var repeatCount = 0
                     val r = object : Runnable {
                         override fun run() {
                             // Stop repeating the instant there's nothing left to delete --
@@ -243,14 +244,22 @@ class CipherIME : InputMethodService() {
                                 ?.getTextBeforeCursor(1, 0).isNullOrEmpty()
                             if (hasTextLeft) {
                                 doBackspace()
-                                repeatHandler.postDelayed(this, 90) // slower than 50ms to avoid racing the host app's text engine
+                                repeatCount++
+                                // ramp up the speed the longer you hold, like Gboard -- starts
+                                // cautious (matches the WhatsApp-safe interval) then accelerates
+                                val interval = when {
+                                    repeatCount < 6 -> 70L
+                                    repeatCount < 16 -> 45L
+                                    else -> 25L
+                                }
+                                repeatHandler.postDelayed(this, interval)
                             } else {
                                 repeatRunnable = null
                             }
                         }
                     }
                     repeatRunnable = r
-                    repeatHandler.postDelayed(r, 400) // wait a beat before repeating
+                    repeatHandler.postDelayed(r, 280) // wait a beat before repeating
                     true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
@@ -416,9 +425,22 @@ class CipherIME : InputMethodService() {
                 it.topMargin = dp(3); it.rightMargin = dp(4)
             }
         })
-        frame.setOnClickListener {
-            val outChar = CipherEngine.letterEncodeMap[plainChar] ?: plainChar
-            commitCipherChar(if (capsOn) outChar else outChar, plainChar.toString().let { if (capsOn) it.uppercase() else it })
+        frame.setOnTouchListener { view, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    // Commit on touch-down rather than waiting for a full click (touch-up +
+                    // Android's click processing) -- this is what was reading as "slow" typing.
+                    view.isPressed = true
+                    val outChar = CipherEngine.letterEncodeMap[plainChar] ?: plainChar
+                    commitCipherChar(outChar, plainChar.toString().let { if (capsOn) it.uppercase() else it })
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    view.isPressed = false
+                    true
+                }
+                else -> false
+            }
         }
         return frame
     }
@@ -445,7 +467,20 @@ class CipherIME : InputMethodService() {
                 it.topMargin = dp(3); it.rightMargin = dp(4)
             }
         })
-        frame.setOnClickListener { commitCipherChar(cipherChar, digitChar.toString()) }
+        frame.setOnTouchListener { view, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    view.isPressed = true
+                    commitCipherChar(cipherChar, digitChar.toString())
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    view.isPressed = false
+                    true
+                }
+                else -> false
+            }
+        }
         return frame
     }
 
@@ -543,6 +578,20 @@ class CipherIME : InputMethodService() {
     private fun doBackspace() {
         val ic = currentInputConnection ?: return
         try {
+            // If the user has an active text selection (dragged the selection handles), a plain
+            // deleteSurroundingText behaves inconsistently across apps -- on WhatsApp specifically
+            // it can end up deleting from the END of the whole message instead of the selection.
+            // Replacing the selection with empty text is the reliable way to handle this.
+            val selected = ic.getSelectedText(0)
+            if (!selected.isNullOrEmpty()) {
+                ic.beginBatchEdit()
+                ic.commitText("", 1)
+                ic.endBatchEdit()
+                if (composing.isNotEmpty()) composing.clear() // selection covered an unknown span -- safest to reset the preview
+                updatePreviewText()
+                return
+            }
+
             // Skip the call entirely if there's nothing before the cursor -- an unnecessary
             // delete on an empty field is one of the ways emoji-aware apps (Reddit, etc.) can
             // desync their own text state and crash on rapid-fire backspace.
