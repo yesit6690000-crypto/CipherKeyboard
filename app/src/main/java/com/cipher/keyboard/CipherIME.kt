@@ -26,6 +26,7 @@ class CipherIME : InputMethodService() {
     private var capsOn = false
     private var symbolsMode = false
     private var emojiMode = false
+    private var clipHistoryMode = false
     private var previewHidden = true
     private var composing = StringBuilder() // tracks plain-text of the current typed run for recheck preview
 
@@ -46,6 +47,11 @@ class CipherIME : InputMethodService() {
     private var clipboardClearRunnable: Runnable? = null
     private val clipboardAutoClearMs = 30000L
 
+    // persistent clipboard history (separate from the live system clipboard, which still auto-clears)
+    private val clipHistoryPrefsName = "cipher_clip_history"
+    private val clipHistoryKey = "items"
+    private val clipHistoryMax = 100
+
     // last clipboard text we already offered to decode, so we don't re-popup the same one every time
     private var lastSeenClip: String? = null
     private var clipListener: ClipboardManager.OnPrimaryClipChangedListener? = null
@@ -55,6 +61,7 @@ class CipherIME : InputMethodService() {
         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipListener = ClipboardManager.OnPrimaryClipChangedListener {
             maybeAutoOfferDecode()
+            addToClipHistory(readClipboardText())
         }
         cm.addPrimaryClipChangedListener(clipListener)
     }
@@ -112,6 +119,8 @@ class CipherIME : InputMethodService() {
 
         if (emojiMode) {
             root.addView(buildEmojiPanel())
+        } else if (clipHistoryMode) {
+            root.addView(buildClipHistoryPanel())
         } else {
             root.addView(buildToolbarRow())
             root.addView(buildPreviewRow())
@@ -130,12 +139,13 @@ class CipherIME : InputMethodService() {
     private fun buildToolbarRow(): View {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            weightSum = 5f
+            weightSum = 6f
         }
         row.addView(smallButton("Kbd") { switchToNextKeyboard() })
         row.addView(smallButton("Copy") { performCopy() })
         row.addView(smallButton("Paste") { performPaste() })
         row.addView(smallButton("All") { performSelectAll() })
+        row.addView(smallButton("Clip") { clipHistoryMode = true; refreshKeyboardView() })
         row.addView(smallButton("Decode") { showDecodePopup() })
         return row
     }
@@ -383,6 +393,123 @@ class CipherIME : InputMethodService() {
             gridCol.addView(row)
         }
         scroll.addView(gridCol)
+        col.addView(scroll)
+
+        return col
+    }
+
+    // ---------- Clipboard history panel ----------
+
+    private fun loadClipHistory(): MutableList<String> {
+        return try {
+            val prefs = getSharedPreferences(clipHistoryPrefsName, Context.MODE_PRIVATE)
+            val raw = prefs.getString(clipHistoryKey, null) ?: return mutableListOf()
+            val arr = org.json.JSONArray(raw)
+            val list = mutableListOf<String>()
+            for (i in 0 until arr.length()) list.add(arr.getString(i))
+            list
+        } catch (e: Exception) {
+            mutableListOf()
+        }
+    }
+
+    private fun saveClipHistory(list: List<String>) {
+        try {
+            val arr = org.json.JSONArray()
+            list.forEach { arr.put(it) }
+            getSharedPreferences(clipHistoryPrefsName, Context.MODE_PRIVATE)
+                .edit().putString(clipHistoryKey, arr.toString()).apply()
+        } catch (e: Exception) {
+            // best-effort persistence -- losing history is better than crashing
+        }
+    }
+
+    /** Adds a copied string to the persistent history, moving it to the front if already present. */
+    private fun addToClipHistory(text: String) {
+        if (text.isBlank()) return
+        try {
+            val list = loadClipHistory()
+            list.remove(text)
+            list.add(0, text)
+            while (list.size > clipHistoryMax) list.removeAt(list.size - 1)
+            saveClipHistory(list)
+        } catch (e: Exception) { /* non-critical */ }
+    }
+
+    private fun buildClipHistoryPanel(): View {
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+        val controlRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        controlRow.addView(controlKey("\u2190 ABC", weight = 2f) {
+            clipHistoryMode = false
+            refreshKeyboardView()
+        })
+        controlRow.addView(View(this).apply { layoutParams = LinearLayout.LayoutParams(0, dp(1), 1f) })
+        controlRow.addView(controlKey("Clear all", weight = 2f) {
+            saveClipHistory(emptyList())
+            refreshKeyboardView()
+        })
+        col.addView(controlRow)
+        col.addView(spacer(4))
+
+        val history = loadClipHistory()
+        val scroll = android.widget.ScrollView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(230))
+        }
+        val listCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+        if (history.isEmpty()) {
+            listCol.addView(TextView(this).apply {
+                text = "Nothing copied yet -- anything you copy will show up here"
+                setTextColor(Color.parseColor("#666666"))
+                textSize = 13f
+                gravity = Gravity.CENTER
+                setPadding(dp(16), dp(24), dp(16), dp(24))
+            })
+        } else {
+            history.forEach { entry ->
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)).also {
+                        it.topMargin = dp(2); it.bottomMargin = dp(2)
+                    }
+                }
+                row.addView(TextView(this).apply {
+                    text = entry
+                    isSingleLine = true
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    setTextColor(Color.parseColor("#DDDDDD"))
+                    textSize = 14f
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(10), 0, dp(10), 0)
+                    background = greyKeyBackground()
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).also {
+                        it.marginEnd = dp(2)
+                    }
+                    setOnClickListener {
+                        commitPlain(entry)
+                        clipHistoryMode = false
+                        refreshKeyboardView()
+                    }
+                })
+                row.addView(TextView(this).apply {
+                    text = "\u00D7"
+                    setTextColor(Color.parseColor("#999999"))
+                    textSize = 18f
+                    gravity = Gravity.CENTER
+                    background = greyKeyBackground()
+                    layoutParams = LinearLayout.LayoutParams(dp(44), ViewGroup.LayoutParams.MATCH_PARENT)
+                    setOnClickListener {
+                        val updated = loadClipHistory()
+                        updated.remove(entry)
+                        saveClipHistory(updated)
+                        refreshKeyboardView()
+                    }
+                })
+                listCol.addView(row)
+            }
+        }
+        scroll.addView(listCol)
         col.addView(scroll)
 
         return col
