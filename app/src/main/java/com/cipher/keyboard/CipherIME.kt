@@ -25,6 +25,7 @@ class CipherIME : InputMethodService() {
 
     private var capsOn = false
     private var symbolsMode = false
+    private var emojiMode = false
     private var previewHidden = true
     private var composing = StringBuilder() // tracks plain-text of the current typed run for recheck preview
 
@@ -81,6 +82,27 @@ class CipherIME : InputMethodService() {
     }
 
     override fun onCreateInputView(): View {
+        return try {
+            buildFullKeyboardView()
+        } catch (e: Exception) {
+            // Never let a build error take the whole keyboard down -- fall back to something
+            // usable so the user isn't locked out of typing entirely.
+            emojiMode = false
+            symbolsMode = false
+            try {
+                buildFullKeyboardView()
+            } catch (e2: Exception) {
+                TextView(this).apply {
+                    text = "Keyboard failed to load -- switch keyboard and back to retry"
+                    setTextColor(Color.WHITE)
+                    setBackgroundColor(Color.BLACK)
+                    setPadding(dp(16), dp(24), dp(16), dp(24))
+                }
+            }
+        }
+    }
+
+    private fun buildFullKeyboardView(): View {
         composing = StringBuilder()
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -88,12 +110,16 @@ class CipherIME : InputMethodService() {
             setPadding(dp(6), dp(8), dp(6), dp(6))
         }
 
-        root.addView(buildToolbarRow())
-        root.addView(buildPreviewRow())
-        root.addView(spacer(6))
-        root.addView(if (symbolsMode) buildSymbolRows() else buildLetterRows())
-        root.addView(spacer(6))
-        root.addView(buildBottomRow())
+        if (emojiMode) {
+            root.addView(buildEmojiPanel())
+        } else {
+            root.addView(buildToolbarRow())
+            root.addView(buildPreviewRow())
+            root.addView(spacer(6))
+            root.addView(if (symbolsMode) buildSymbolRows() else buildLetterRows())
+            root.addView(spacer(6))
+            root.addView(buildBottomRow())
+        }
 
         keyboardRootView = root
         return root
@@ -200,9 +226,8 @@ class CipherIME : InputMethodService() {
             text = "\u232B"
             setTextColor(Color.parseColor("#999999"))
             textSize = 14f
-            background = null
-            setBackgroundResource(android.R.drawable.list_selector_background)
-            layoutParams = LinearLayout.LayoutParams(0, dp(56), weight)
+            background = greyKeyBackground()
+            layoutParams = keyMargins(weight)
         }
         btn.setOnTouchListener { _, event ->
             when (event.action) {
@@ -210,8 +235,18 @@ class CipherIME : InputMethodService() {
                     doBackspace() // immediate first delete
                     val r = object : Runnable {
                         override fun run() {
-                            doBackspace()
-                            repeatHandler.postDelayed(this, 50)
+                            // Stop repeating the instant there's nothing left to delete --
+                            // firing deleteSurroundingText on an empty/already-shrinking field
+                            // is what triggers a selection-handle crash in some apps' emoji
+                            // libraries (seen on WhatsApp/MIUI).
+                            val hasTextLeft = !currentInputConnection
+                                ?.getTextBeforeCursor(1, 0).isNullOrEmpty()
+                            if (hasTextLeft) {
+                                doBackspace()
+                                repeatHandler.postDelayed(this, 90) // slower than 50ms to avoid racing the host app's text engine
+                            } else {
+                                repeatRunnable = null
+                            }
                         }
                     }
                     repeatRunnable = r
@@ -235,17 +270,107 @@ class CipherIME : InputMethodService() {
             symbolsMode = !symbolsMode
             refreshKeyboardView()
         })
+        row.addView(controlKey("\u263A", weight = 1f) {
+            emojiMode = true
+            refreshKeyboardView()
+        })
         val space = Button(this).apply {
             text = if (symbolsMode) "space" else "space (cipher)"
             setTextColor(Color.parseColor("#666666"))
             textSize = 12f
-            setBackgroundResource(android.R.drawable.list_selector_background)
-            layoutParams = LinearLayout.LayoutParams(0, dp(56), 5f)
+            background = greyKeyBackground()
+            layoutParams = LinearLayout.LayoutParams(0, dp(60), 5f).also {
+                it.marginStart = dp(3); it.marginEnd = dp(3)
+                it.topMargin = dp(3); it.bottomMargin = dp(3)
+            }
             setOnClickListener { commitPlain(" ") }
         }
         row.addView(space)
         row.addView(controlKey("\u21B5", weight = 1.4f, accent = true) { sendEnter() })
         return row
+    }
+
+    // ---------- Emoji panel ----------
+
+    private var currentEmojiCategory = 0
+
+    private val emojiCategories: List<Pair<String, List<String>>> by lazy {
+        listOf(
+            "\uD83D\uDE00" to listOf("😀","😃","😄","😁","😆","😅","😂","🤣","😊","😇","🙂","🙃","😉","😌","😍","🥰","😘","😗","😙","😚","😋","😛","😝","😜","🤪","🤨","🧐","🤓","😎","🥸","🤩","🥳","😏","😒","😞","😔","🙁","☹️","😣","😖","😫","😩","🥺","😢","😭","😤","😠","😡","🤬","🤯","😳","🥵","🥶","😱","😨","😰","😥","🤗","🤔","🤭","🤫","🤥","😶","😐","😑","🙄","😯","😦","😮","😲","🥱","😴","🤤","😵","🥴","🤢","🤮","🤧","😷","🤒","🤕","🥹"),
+            "\uD83D\uDC36" to listOf("🐶","🐱","🐭","🐹","🐰","🦊","🐻","🐼","🐨","🐯","🦁","🐮","🐷","🐸","🐵","🙈","🙉","🙊","🐔","🐧","🐦","🐤","🦆","🦅","🦉","🦇","🐺","🐗","🐴","🦄","🐝","🐛","🦋","🐌","🐞","🐜","🕷️","🐢","🐍","🦎","🐙","🦑","🦀","🐡","🐠","🐟","🐬","🐳","🐋","🦈","🐊","🦓","🦍","🐘","🦛","🦏","🐪","🦒","🐕","🐩","🐈","🦃","🦚","🦜","🐇","🦔"),
+            "\uD83C\uDF4E" to listOf("🍏","🍎","🍐","🍊","🍋","🍌","🍉","🍇","🍓","🫐","🍈","🍒","🍑","🥭","🍍","🥥","🥝","🍅","🥑","🥦","🥒","🌶️","🌽","🥕","🥔","🍠","🥐","🍞","🧀","🥚","🍳","🥞","🥓","🍗","🍔","🍟","🍕","🌭","🌮","🌯","🥗","🍝","🍜","🍲","🍣","🍱","🍤","🍙","🍚","🍧","🍦","🍨","🎂","🍰","🍩","🍪","🍫","🍬","🍭","🍿","🧁","🥜","🍯"),
+            "\u26BD" to listOf("⚽","🏀","🏈","⚾","🥎","🎾","🏐","🏉","🎱","🏓","🏸","🏒","🏑","🥍","🏏","⛳","🏹","🎣","🥊","🥋","🎽","🛹","🛷","⛸️","🎿","🏂","🏋️","🤼","🤸","⛹️","🤺","🏌️","🏇","🧘","🏄","🏊","🤽","🚣","🧗","🚵","🚴","🏆","🥇","🥈","🥉","🏅","🎖️","🎪","🤹","🎭","🎨","🎬","🎤","🎧","🎼","🎹","🥁","🎷","🎺","🎸","🎻","🎲","🎯","🎳","🎮"),
+            "\u2708\uFE0F" to listOf("🚗","🚕","🚙","🚌","🏎️","🚓","🚑","🚒","🚐","🚚","🏍️","🚲","🛴","🚨","🚂","🚆","🚇","🚊","✈️","🛫","🛬","🚀","🛸","🚁","⛵","🚤","🛳️","⚓","🚧","🚦","🗺️","🗽","🗼","🏰","🏯","🎡","🎢","🎠","⛲","🏖️","🏝️","🏜️","🌋","⛰️","🏔️","🏕️","⛺","🏠","🏢","🏬","🏥","🏦","🏨","💒","⛪","🕌","🕍","🛕","⛩️"),
+            "\uD83D\uDCA1" to listOf("⌚","📱","💻","⌨️","🖥️","🖨️","🖱️","📷","📸","📹","📞","☎️","📺","📻","🎙️","🧭","⏰","⌛","⏳","🔋","🔌","💡","🔦","🕯️","💰","💳","🧾","💎","🔧","🔨","⚙️","🔩","🔫","💣","🔪","🚪","🛏️","🛋️","🚽","🚿","🛁","🧴","🧹","🧻","🔑","🗝️","📁","📅","📌","📎","✂️","🔒","🔓","💊","💉","🩸","🩹","🚬","⚰️","🏺","🔮","📿","🔭"),
+            "\u2764\uFE0F" to listOf("❤️","🧡","💛","💚","💙","💜","🖤","🤍","🤎","💔","❣️","💕","💞","💓","💗","💖","💘","💝","☮️","✝️","☪️","🕉️","☸️","✡️","☯️","♈","♉","♊","♋","♌","♍","♎","♏","♐","♑","♒","♓","⚠️","♻️","✅","❌","❗","❓","‼️","⁉️","💯","🔞","🔥","💧","⭐","🌟","✨","⚡","🌈","☀️","🌙","☁️","❄️","🔴","🟠","🟡","🟢","🔵","🟣"),
+            "\uD83C\uDFF3\uFE0F" to listOf("🏳️","🏴","🚩","🏳️‍🌈","🏳️‍⚧️","🇺🇳","🇺🇸","🇬🇧","🇮🇳","🇧🇩","🇨🇦","🇦🇺","🇩🇪","🇫🇷","🇮🇹","🇯🇵","🇰🇷","🇨🇳","🇧🇷","🇷🇺","🇪🇸","🇵🇰","🇸🇦","🇦🇪","🇳🇬","🇿🇦","🇲🇽")
+        )
+    }
+
+    private fun buildEmojiPanel(): View {
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+        // top control row: back to ABC, and backspace so you can delete an emoji you just tapped
+        val controlRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        controlRow.addView(controlKey("\u2190 ABC", weight = 1.6f) {
+            emojiMode = false
+            refreshKeyboardView()
+        })
+        controlRow.addView(View(this).apply { layoutParams = LinearLayout.LayoutParams(0, dp(1), 3f) })
+        controlRow.addView(backspaceKey(weight = 1.2f))
+        col.addView(controlRow)
+
+        // category tabs
+        val tabsScroll = android.widget.HorizontalScrollView(this)
+        val tabsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        emojiCategories.forEachIndexed { index, (icon, _) ->
+            tabsRow.addView(TextView(this).apply {
+                text = icon
+                textSize = 20f
+                gravity = Gravity.CENTER
+                setPadding(dp(10), dp(6), dp(10), dp(6))
+                background = if (index == currentEmojiCategory) {
+                    android.graphics.drawable.GradientDrawable().apply {
+                        cornerRadius = dp(6).toFloat()
+                        setColor(Color.parseColor("#333333"))
+                    }
+                } else null
+                setOnClickListener {
+                    currentEmojiCategory = index
+                    refreshKeyboardView()
+                }
+            })
+        }
+        tabsScroll.addView(tabsRow)
+        col.addView(tabsScroll)
+
+        // emoji grid for the selected category
+        val scroll = android.widget.ScrollView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(210))
+        }
+        val gridCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val emojis = emojiCategories.getOrNull(currentEmojiCategory)?.second ?: emptyList()
+        emojis.chunked(8).forEach { rowEmojis ->
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            rowEmojis.forEach { emoji ->
+                row.addView(TextView(this).apply {
+                    text = emoji
+                    textSize = 22f
+                    gravity = Gravity.CENTER
+                    layoutParams = LinearLayout.LayoutParams(0, dp(46), 1f)
+                    setOnClickListener { commitPlain(emoji) }
+                })
+            }
+            // pad out the last row so keys stay evenly sized even if it's not a full row of 8
+            repeat(8 - rowEmojis.size) {
+                row.addView(View(this).apply { layoutParams = LinearLayout.LayoutParams(0, dp(46), 1f) })
+            }
+            gridCol.addView(row)
+        }
+        scroll.addView(gridCol)
+        col.addView(scroll)
+
+        return col
     }
 
     // ---------- Key factories ----------
@@ -272,8 +397,8 @@ class CipherIME : InputMethodService() {
         val shown = if (capsOn) plainChar.uppercaseChar() else plainChar
         val cipherChar = CipherEngine.letterEncodeMap[plainChar] ?: plainChar
         val frame = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(0, dp(56), weight)
-            setBackgroundResource(android.R.drawable.list_selector_background)
+            layoutParams = keyMargins(weight)
+            background = greyKeyBackground()
         }
         frame.addView(TextView(this).apply {
             text = cipherChar.toString()
@@ -301,8 +426,8 @@ class CipherIME : InputMethodService() {
     private fun digitKey(digitChar: Char, weight: Float): View {
         val cipherChar = CipherEngine.digitEncodeMap[digitChar] ?: digitChar
         val frame = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(0, dp(56), weight)
-            setBackgroundResource(android.R.drawable.list_selector_background)
+            layoutParams = keyMargins(weight)
+            background = greyKeyBackground()
         }
         frame.addView(TextView(this).apply {
             text = cipherChar.toString()
@@ -330,8 +455,8 @@ class CipherIME : InputMethodService() {
             text = c.toString()
             setTextColor(Color.parseColor("#EEEEEE"))
             textSize = 17f
-            setBackgroundResource(android.R.drawable.list_selector_background)
-            layoutParams = LinearLayout.LayoutParams(0, dp(56), weight)
+            background = greyKeyBackground()
+            layoutParams = keyMargins(weight)
             setOnClickListener { commitPlain(c.toString()) }
         }
         return btn
@@ -342,13 +467,18 @@ class CipherIME : InputMethodService() {
             text = label
             setTextColor(if (accent) Color.parseColor("#111111") else Color.parseColor("#999999"))
             textSize = 14f
-            if (accent) {
-                setBackgroundColor(Color.parseColor("#E8763C"))
+            background = if (accent) {
+                android.graphics.drawable.GradientDrawable().apply {
+                    cornerRadius = dp(6).toFloat()
+                    setColor(Color.parseColor("#E8763C"))
+                }
             } else {
-                setBackgroundResource(android.R.drawable.list_selector_background)
+                greyKeyBackground()
             }
-            layoutParams = LinearLayout.LayoutParams(0, dp(56), weight)
-            setOnClickListener { onClick() }
+            layoutParams = keyMargins(weight)
+            setOnClickListener {
+                try { onClick() } catch (e: Exception) { /* never let a key press crash the keyboard */ }
+            }
         }
     }
 
@@ -369,39 +499,85 @@ class CipherIME : InputMethodService() {
         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(heightDp))
     }
 
+    /** Grey rounded-box background with a lighter tone while pressed -- matches Gboard's key look. */
+    private fun greyKeyBackground(): android.graphics.drawable.Drawable {
+        val normal = android.graphics.drawable.GradientDrawable().apply {
+            cornerRadius = dp(6).toFloat()
+            setColor(Color.parseColor("#2B2B2B"))
+        }
+        val pressed = android.graphics.drawable.GradientDrawable().apply {
+            cornerRadius = dp(6).toFloat()
+            setColor(Color.parseColor("#3D3D3D"))
+        }
+        return android.graphics.drawable.StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_pressed), pressed)
+            addState(intArrayOf(), normal)
+        }
+    }
+
+    private fun keyMargins(weight: Float, heightDp: Int = 60): LinearLayout.LayoutParams {
+        return LinearLayout.LayoutParams(0, dp(heightDp), weight).also {
+            it.marginStart = dp(3); it.marginEnd = dp(3)
+            it.topMargin = dp(3); it.bottomMargin = dp(3)
+        }
+    }
+
     // ---------- Input actions ----------
 
     private fun commitCipherChar(cipherChar: Char, plainEquivalent: String) {
-        currentInputConnection?.commitText(cipherChar.toString(), 1)
+        try {
+            currentInputConnection?.commitText(cipherChar.toString(), 1)
+        } catch (e: Exception) { /* target field rejected the commit -- ignore rather than crash */ }
         composing.append(plainEquivalent)
         updatePreviewText()
     }
 
     private fun commitPlain(text: String) {
-        currentInputConnection?.commitText(text, 1)
+        try {
+            currentInputConnection?.commitText(text, 1)
+        } catch (e: Exception) { /* target field rejected the commit -- ignore rather than crash */ }
         composing.append(text)
         updatePreviewText()
     }
 
     private fun doBackspace() {
-        currentInputConnection?.deleteSurroundingText(1, 0)
+        val ic = currentInputConnection ?: return
+        try {
+            // Skip the call entirely if there's nothing before the cursor -- an unnecessary
+            // delete on an empty field is one of the ways emoji-aware apps (Reddit, etc.) can
+            // desync their own text state and crash on rapid-fire backspace.
+            val before = ic.getTextBeforeCursor(1, 0)
+            if (before.isNullOrEmpty()) return
+            ic.beginBatchEdit()
+            ic.deleteSurroundingText(1, 0)
+            ic.endBatchEdit()
+        } catch (e: Exception) {
+            // Some apps' custom InputConnection wrappers (emoji-aware text fields especially)
+            // can throw on rapid delete calls -- fail quietly rather than taking the keyboard down.
+        }
         if (composing.isNotEmpty()) composing.deleteCharAt(composing.length - 1)
         updatePreviewText()
     }
 
     private fun sendEnter() {
-        currentInputConnection?.sendKeyEvent(
-            android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_ENTER)
-        )
-        currentInputConnection?.sendKeyEvent(
-            android.view.KeyEvent(android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_ENTER)
-        )
+        try {
+            currentInputConnection?.sendKeyEvent(
+                android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_ENTER)
+            )
+            currentInputConnection?.sendKeyEvent(
+                android.view.KeyEvent(android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_ENTER)
+            )
+        } catch (e: Exception) { /* target app rejected the key event -- ignore rather than crash */ }
         composing.clear()
         updatePreviewText()
     }
 
     private fun refreshKeyboardView() {
-        setInputView(onCreateInputView())
+        try {
+            setInputView(onCreateInputView())
+        } catch (e: Exception) {
+            Toast.makeText(this, "Keyboard refresh failed", Toast.LENGTH_SHORT).show()
+        }
     }
 
     // ---------- Preview / recheck / eye ----------
@@ -449,8 +625,13 @@ class CipherIME : InputMethodService() {
     // ---------- Clipboard tools ----------
 
     private fun performCopy() {
-        currentInputConnection?.performContextMenuAction(android.R.id.copy)
-        scheduleClipboardAutoClear()
+        try {
+            val hadConnection = currentInputConnection != null
+            currentInputConnection?.performContextMenuAction(android.R.id.copy)
+            if (hadConnection) scheduleClipboardAutoClear()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Couldn't copy -- select some text first", Toast.LENGTH_SHORT).show()
+        }
     }
 
     /**
@@ -477,16 +658,28 @@ class CipherIME : InputMethodService() {
     }
 
     private fun performPaste() {
-        currentInputConnection?.performContextMenuAction(android.R.id.paste)
+        try {
+            currentInputConnection?.performContextMenuAction(android.R.id.paste)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Couldn't paste", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun performSelectAll() {
-        currentInputConnection?.performContextMenuAction(android.R.id.selectAll)
+        try {
+            currentInputConnection?.performContextMenuAction(android.R.id.selectAll)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Couldn't select all", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun switchToNextKeyboard() {
-        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-        imm.showInputMethodPicker()
+        try {
+            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+            imm.showInputMethodPicker()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Couldn't open keyboard picker", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun showDecodePopup() {
