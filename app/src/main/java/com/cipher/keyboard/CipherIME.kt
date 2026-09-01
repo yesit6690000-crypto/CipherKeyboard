@@ -154,7 +154,10 @@ class CipherIME : InputMethodService() {
         previewText = TextView(this).apply {
             setTextColor(Color.parseColor("#888888"))
             textSize = 15f
-            maxLines = 1
+            isSingleLine = true
+            // Truncate from the START (not the end) once the box fills up, so the newest
+            // characters you just typed stay visible instead of getting pushed off-screen.
+            ellipsize = android.text.TextUtils.TruncateAt.START
             gravity = Gravity.START or Gravity.CENTER_VERTICAL
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
@@ -511,7 +514,7 @@ class CipherIME : InputMethodService() {
             keyPreviewHideRunnable?.let { repeatHandler.removeCallbacks(it) }
             val hideRunnable = Runnable { try { popup.dismiss() } catch (e: Exception) {} }
             keyPreviewHideRunnable = hideRunnable
-            repeatHandler.postDelayed(hideRunnable, 110)
+            repeatHandler.postDelayed(hideRunnable, 80)
         } catch (e: Exception) {
             // preview is purely cosmetic -- never let it interfere with actual typing
         }
@@ -599,21 +602,26 @@ class CipherIME : InputMethodService() {
         try {
             currentInputConnection?.commitText(cipherChar.toString(), 1)
         } catch (e: Exception) { /* target field rejected the commit -- ignore rather than crash */ }
-        syncComposingFromField()
+        // Fast local append -- no round-trip to the target app needed for a normal keystroke,
+        // which is what keeps typing feeling instant.
+        composing.append(plainEquivalent)
+        updatePreviewText()
     }
 
     private fun commitPlain(text: String) {
         try {
             currentInputConnection?.commitText(text, 1)
         } catch (e: Exception) { /* target field rejected the commit -- ignore rather than crash */ }
-        syncComposingFromField()
+        composing.append(text)
+        updatePreviewText()
     }
 
     /**
      * Re-derives the recheck preview directly from the real text field (decoding whatever cipher
-     * text sits before the cursor) instead of tracking edits in a separate buffer. A tracked
-     * buffer can silently drift out of sync with the real field after deletes, selections, or
-     * cursor moves -- always reading the actual field is what keeps the preview accurate.
+     * text sits before the cursor) instead of trusting the locally tracked buffer. Used only for
+     * the less-frequent cases (selection deletes, manual recheck) where accuracy matters more
+     * than shaving a few milliseconds -- calling this on every keystroke is what made typing feel
+     * sluggish, since it's a round-trip to the target app every time.
      */
     private fun syncComposingFromField() {
         try {
@@ -631,7 +639,9 @@ class CipherIME : InputMethodService() {
             // If the user has an active text selection (dragged the selection handles), a plain
             // deleteSurroundingText behaves inconsistently across apps -- on WhatsApp specifically
             // it can end up deleting from the END of the whole message instead of the selection.
-            // Replacing the selection with empty text is the reliable way to handle this.
+            // Replacing the selection with empty text is the reliable way to handle this. This is
+            // the one delete path where we pay for a full resync, since it's a rare, deliberate
+            // action rather than something fired dozens of times a second.
             val selected = ic.getSelectedText(0)
             if (!selected.isNullOrEmpty()) {
                 ic.beginBatchEdit()
@@ -653,7 +663,10 @@ class CipherIME : InputMethodService() {
             // Some apps' custom InputConnection wrappers (emoji-aware text fields especially)
             // can throw on rapid delete calls -- fail quietly rather than taking the keyboard down.
         }
-        syncComposingFromField()
+        // Fast local delete for the normal (non-selection) case -- this path fires as often as
+        // every 25ms while holding backspace, so it must stay a local, no-IPC operation.
+        if (composing.isNotEmpty()) composing.deleteCharAt(composing.length - 1)
+        updatePreviewText()
     }
 
     private fun sendEnter() {
