@@ -142,8 +142,11 @@ class CipherIME : InputMethodService() {
 
     private fun buildPreviewRow(): View {
         val row = FrameLayout(this).apply {
-            setBackgroundColor(Color.parseColor("#111111"))
-            setPadding(dp(10), dp(8), dp(10), dp(8))
+            background = android.graphics.drawable.GradientDrawable().apply {
+                cornerRadius = dp(10).toFloat()
+                setColor(Color.parseColor("#161616"))
+            }
+            setPadding(dp(12), dp(8), dp(10), dp(8))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(38)
             ).also { it.topMargin = dp(6) }
@@ -429,7 +432,7 @@ class CipherIME : InputMethodService() {
             val outChar = CipherEngine.letterEncodeMap[plainChar] ?: plainChar
             val outLabel = plainChar.toString().let { if (capsOn) it.uppercase() else it }
             commitCipherChar(outChar, outLabel)
-            showKeyPreview(view, outChar.toString())
+            showKeyPreview(view, outLabel) // show the plain English letter, not the cipher glyph
         }
         return frame
     }
@@ -458,7 +461,7 @@ class CipherIME : InputMethodService() {
         })
         frame.setOnClickListener { view ->
             commitCipherChar(cipherChar, digitChar.toString())
-            showKeyPreview(view, cipherChar.toString())
+            showKeyPreview(view, digitChar.toString()) // show the plain digit, not the cipher glyph
         }
         return frame
     }
@@ -508,7 +511,7 @@ class CipherIME : InputMethodService() {
             keyPreviewHideRunnable?.let { repeatHandler.removeCallbacks(it) }
             val hideRunnable = Runnable { try { popup.dismiss() } catch (e: Exception) {} }
             keyPreviewHideRunnable = hideRunnable
-            repeatHandler.postDelayed(hideRunnable, 200)
+            repeatHandler.postDelayed(hideRunnable, 110)
         } catch (e: Exception) {
             // preview is purely cosmetic -- never let it interfere with actual typing
         }
@@ -551,9 +554,12 @@ class CipherIME : InputMethodService() {
         return Button(this).apply {
             text = label
             textSize = 11f
-            setTextColor(Color.parseColor("#DDDDDD"))
-            setBackgroundColor(Color.parseColor("#1C1C1C"))
-            layoutParams = LinearLayout.LayoutParams(0, dp(36), 1f).also {
+            setTextColor(Color.parseColor("#CCCCCC"))
+            background = android.graphics.drawable.GradientDrawable().apply {
+                cornerRadius = dp(16).toFloat() // pill shape, closer to Gboard's toolbar chips
+                setColor(Color.parseColor("#232323"))
+            }
+            layoutParams = LinearLayout.LayoutParams(0, dp(34), 1f).also {
                 it.marginStart = dp(3); it.marginEnd = dp(3)
             }
             setOnClickListener { onClick() }
@@ -567,12 +573,12 @@ class CipherIME : InputMethodService() {
     /** Grey rounded-box background with a lighter tone while pressed -- matches Gboard's key look. */
     private fun greyKeyBackground(): android.graphics.drawable.Drawable {
         val normal = android.graphics.drawable.GradientDrawable().apply {
-            cornerRadius = dp(6).toFloat()
-            setColor(Color.parseColor("#2B2B2B"))
+            cornerRadius = dp(9).toFloat() // slightly rounder corners, closer to modern Gboard
+            setColor(Color.parseColor("#2C2C2E"))
         }
         val pressed = android.graphics.drawable.GradientDrawable().apply {
-            cornerRadius = dp(6).toFloat()
-            setColor(Color.parseColor("#3D3D3D"))
+            cornerRadius = dp(9).toFloat()
+            setColor(Color.parseColor("#454548"))
         }
         return android.graphics.drawable.StateListDrawable().apply {
             addState(intArrayOf(android.R.attr.state_pressed), pressed)
@@ -593,15 +599,29 @@ class CipherIME : InputMethodService() {
         try {
             currentInputConnection?.commitText(cipherChar.toString(), 1)
         } catch (e: Exception) { /* target field rejected the commit -- ignore rather than crash */ }
-        composing.append(plainEquivalent)
-        updatePreviewText()
+        syncComposingFromField()
     }
 
     private fun commitPlain(text: String) {
         try {
             currentInputConnection?.commitText(text, 1)
         } catch (e: Exception) { /* target field rejected the commit -- ignore rather than crash */ }
-        composing.append(text)
+        syncComposingFromField()
+    }
+
+    /**
+     * Re-derives the recheck preview directly from the real text field (decoding whatever cipher
+     * text sits before the cursor) instead of tracking edits in a separate buffer. A tracked
+     * buffer can silently drift out of sync with the real field after deletes, selections, or
+     * cursor moves -- always reading the actual field is what keeps the preview accurate.
+     */
+    private fun syncComposingFromField() {
+        try {
+            val before = currentInputConnection?.getTextBeforeCursor(500, 0)?.toString() ?: ""
+            composing = StringBuilder(CipherEngine.decode(before).takeLast(200))
+        } catch (e: Exception) {
+            // If we can't read the field for some reason, leave composing as-is rather than crash.
+        }
         updatePreviewText()
     }
 
@@ -617,8 +637,7 @@ class CipherIME : InputMethodService() {
                 ic.beginBatchEdit()
                 ic.commitText("", 1)
                 ic.endBatchEdit()
-                if (composing.isNotEmpty()) composing.clear() // selection covered an unknown span -- safest to reset the preview
-                updatePreviewText()
+                syncComposingFromField()
                 return
             }
 
@@ -634,8 +653,7 @@ class CipherIME : InputMethodService() {
             // Some apps' custom InputConnection wrappers (emoji-aware text fields especially)
             // can throw on rapid delete calls -- fail quietly rather than taking the keyboard down.
         }
-        if (composing.isNotEmpty()) composing.deleteCharAt(composing.length - 1)
-        updatePreviewText()
+        syncComposingFromField()
     }
 
     private fun sendEnter() {
@@ -683,13 +701,8 @@ class CipherIME : InputMethodService() {
     }
 
     private fun refreshPreviewNow() {
-        // Re-derive composing from the actual field in case the user edited via cursor/selection elsewhere.
-        val ic = currentInputConnection ?: return
-        val before = ic.getTextBeforeCursor(500, 0)?.toString() ?: ""
-        val decodedTail = CipherEngine.decode(before)
-        composing = StringBuilder(decodedTail.takeLast(200))
         previewHidden = false
-        updatePreviewText()
+        syncComposingFromField()
     }
 
     private fun togglePreviewVisibility() {
