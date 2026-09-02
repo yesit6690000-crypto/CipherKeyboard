@@ -894,19 +894,35 @@ class CipherIME : InputMethodService() {
     }
 
     /** Grey rounded-box background with a lighter tone while pressed -- matches Gboard's key look. */
+    // Built once and reused via constantState.newDrawable() -- every key used to construct two
+    // fresh GradientDrawable objects plus a StateListDrawable wrapper from scratch, every single
+    // time the keyboard redrew (which happens on every Shift press and every mode switch). With
+    // ~30 keys on screen, that added up to real, measurable lag on exactly the actions people do
+    // most often. Deriving from a cached template is far cheaper while still keeping each key's
+    // pressed-state fully independent (a naive single shared Drawable instance would make every
+    // key flash "pressed" together, which is worse than the slowness it would "fix").
+    private var greyKeyBackgroundTemplate: android.graphics.drawable.StateListDrawable? = null
+
     private fun greyKeyBackground(): android.graphics.drawable.Drawable {
-        val normal = android.graphics.drawable.GradientDrawable().apply {
-            cornerRadius = dp(9).toFloat() // slightly rounder corners, closer to modern Gboard
-            setColor(Color.parseColor("#2C2C2E"))
+        var template = greyKeyBackgroundTemplate
+        if (template == null) {
+            val normal = android.graphics.drawable.GradientDrawable().apply {
+                cornerRadius = dp(9).toFloat() // slightly rounder corners, closer to modern Gboard
+                setColor(Color.parseColor("#2C2C2E"))
+            }
+            val pressed = android.graphics.drawable.GradientDrawable().apply {
+                cornerRadius = dp(9).toFloat()
+                setColor(Color.parseColor("#454548"))
+            }
+            template = android.graphics.drawable.StateListDrawable().apply {
+                addState(intArrayOf(android.R.attr.state_pressed), pressed)
+                addState(intArrayOf(), normal)
+            }
+            greyKeyBackgroundTemplate = template
         }
-        val pressed = android.graphics.drawable.GradientDrawable().apply {
-            cornerRadius = dp(9).toFloat()
-            setColor(Color.parseColor("#454548"))
-        }
-        return android.graphics.drawable.StateListDrawable().apply {
-            addState(intArrayOf(android.R.attr.state_pressed), pressed)
-            addState(intArrayOf(), normal)
-        }
+        // newDrawable() + mutate() gives each key its own independent state, cheaply derived
+        // from the cached template instead of rebuilt from scratch.
+        return template.constantState?.newDrawable(resources)?.mutate() ?: template
     }
 
     private fun keyMargins(weight: Float, heightDp: Int = 50): LinearLayout.LayoutParams {
