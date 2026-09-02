@@ -201,7 +201,7 @@ class CipherIME : InputMethodService() {
     private fun getStoredPassphrase(): String? {
         return try {
             getSharedPreferences("cipher_settings", Context.MODE_PRIVATE)
-                .getString("passphrase", null)?.takeIf { it.isNotEmpty() }
+                .getString("passphrase", null)?.trim()?.takeIf { it.isNotEmpty() }
         } catch (e: Exception) {
             null
         }
@@ -247,20 +247,36 @@ class CipherIME : InputMethodService() {
             Toast.makeText(this, "No text field is focused", Toast.LENGTH_SHORT).show()
             return
         }
-        try {
-            val encrypted = AesEngine.encrypt(plaintext, passphrase)
-            val beforeLen = ic.getTextBeforeCursor(10000, 0)?.length ?: 0
-            val afterLen = ic.getTextAfterCursor(10000, 0)?.length ?: 0
-            ic.beginBatchEdit()
-            ic.deleteSurroundingText(beforeLen, afterLen)
-            ic.commitText(encrypted, 1)
-            ic.endBatchEdit()
-            composing = StringBuilder()
-            updatePreviewText()
-            Toast.makeText(this, "Encrypted -- ready to send", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            Toast.makeText(this, "Encryption failed, nothing was changed", Toast.LENGTH_SHORT).show()
-        }
+        // The actual crypto work (PBKDF2) is deliberately slow and can take real time on a
+        // mid-range phone -- running it on the UI thread was what made Encrypt (and the whole
+        // keyboard, since it shares the same thread) feel like it froze for a moment. Doing the
+        // work on a background thread keeps the keyboard responsive the entire time.
+        Thread {
+            val encrypted = try {
+                AesEngine.encrypt(plaintext, passphrase)
+            } catch (e: Exception) {
+                null
+            }
+            repeatHandler.post {
+                if (encrypted == null) {
+                    Toast.makeText(this, "Encryption failed, nothing was changed", Toast.LENGTH_SHORT).show()
+                    return@post
+                }
+                try {
+                    val beforeLen = ic.getTextBeforeCursor(10000, 0)?.length ?: 0
+                    val afterLen = ic.getTextAfterCursor(10000, 0)?.length ?: 0
+                    ic.beginBatchEdit()
+                    ic.deleteSurroundingText(beforeLen, afterLen)
+                    ic.commitText(encrypted, 1)
+                    ic.endBatchEdit()
+                    composing = StringBuilder()
+                    updatePreviewText()
+                    Toast.makeText(this, "Encrypted -- ready to send", Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    Toast.makeText(this, "Encryption failed, nothing was changed", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }.start()
     }
 
     private fun buildPreviewRow(): View {
@@ -1056,12 +1072,17 @@ class CipherIME : InputMethodService() {
                 return
             }
             lastSeenClip = text
-            val decoded = AesEngine.decrypt(text, passphrase)
-            if (decoded == null) {
-                Toast.makeText(this, "Couldn't decrypt -- wrong passphrase?", Toast.LENGTH_LONG).show()
-            } else {
-                showDecodedDialog(decoded)
-            }
+            // Off the main thread -- same PBKDF2 cost as encrypt, same reason to not block the UI.
+            Thread {
+                val decoded = AesEngine.decrypt(text, passphrase)
+                repeatHandler.post {
+                    if (decoded == null) {
+                        Toast.makeText(this, "Couldn't decrypt -- check the passphrase matches exactly on both sides", Toast.LENGTH_LONG).show()
+                    } else {
+                        showDecodedDialog(decoded)
+                    }
+                }
+            }.start()
             return
         }
         if (!CipherEngine.looksEncoded(text)) {
@@ -1085,8 +1106,10 @@ class CipherIME : InputMethodService() {
         if (AesEngine.looksEncrypted(text)) {
             val passphrase = getStoredPassphrase() ?: return // no passphrase set yet -- stay silent rather than nag on every clipboard change
             lastSeenClip = text
-            val decoded = AesEngine.decrypt(text, passphrase) ?: return // wrong passphrase -- only report that on an explicit Decode tap, not on every auto-check
-            showDecodedDialog(decoded)
+            Thread {
+                val decoded = AesEngine.decrypt(text, passphrase) ?: return@Thread // wrong passphrase -- only report that on an explicit Decode tap, not on every auto-check
+                repeatHandler.post { showDecodedDialog(decoded) }
+            }.start()
             return
         }
         if (!CipherEngine.looksEncoded(text)) return

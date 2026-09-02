@@ -85,7 +85,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(passphraseStatus)
 
         root.addView(actionButton("Save passphrase") {
-            val value = passphraseInput.text.toString()
+            val value = passphraseInput.text.toString().trim()
             prefs.edit().putString("passphrase", value).apply()
             passphraseStatus.text = if (value.isEmpty()) "Not set -- Encrypt/Decode won't work until both sides set one" else "Passphrase is set on this device"
             passphraseStatus.setTextColor(if (value.isEmpty()) Color.parseColor("#CC6666") else Color.parseColor("#66AA66"))
@@ -141,7 +141,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 0, 0, 20)
         }
         aesRow.addView(actionButton("AES Encrypt") {
-            val pass = prefs.getString("passphrase", "") ?: ""
+            val pass = (prefs.getString("passphrase", "") ?: "").trim()
             if (pass.isEmpty()) {
                 Toast.makeText(this, "Set a passphrase above first", Toast.LENGTH_SHORT).show()
             } else {
@@ -149,7 +149,7 @@ class MainActivity : AppCompatActivity() {
             }
         }.apply { layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) })
         aesRow.addView(actionButton("AES Decode") {
-            val pass = prefs.getString("passphrase", "") ?: ""
+            val pass = (prefs.getString("passphrase", "") ?: "").trim()
             if (pass.isEmpty()) {
                 Toast.makeText(this, "Set a passphrase above first", Toast.LENGTH_SHORT).show()
             } else {

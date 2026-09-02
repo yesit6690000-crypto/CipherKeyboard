@@ -21,11 +21,18 @@ import javax.crypto.spec.SecretKeySpec
  */
 object AesEngine {
     private const val PREFIX = "CK1:"
-    private const val PBKDF2_ITERATIONS = 120_000
+    // 60k iterations instead of 120k -- still far beyond what a substitution cipher offers,
+    // but noticeably faster on mid-range phones. Combined with running this off the main
+    // thread (see CipherIME), Encrypt/Decode should feel close to instant now.
+    private const val PBKDF2_ITERATIONS = 60_000
     private const val KEY_LENGTH_BITS = 256
     private const val GCM_TAG_LENGTH_BITS = 128
     private const val SALT_LENGTH_BYTES = 16
     private const val IV_LENGTH_BYTES = 12
+    // URL_SAFE avoids '+' and '/' and NO_PADDING drops the trailing '=' -- standard Base64's
+    // characters are occasionally mangled by messaging apps' autocorrect/smart-punctuation,
+    // which is the most likely cause of "copied but won't decode."
+    private const val BASE64_FLAGS = Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING
 
     /** Whether this text looks like something AesEngine produced (vs. plain text or the old substitution cipher). */
     fun looksEncrypted(text: String): Boolean = text.startsWith(PREFIX)
@@ -37,7 +44,11 @@ object AesEngine {
         return SecretKeySpec(keyBytes, "AES")
     }
 
-    /** Encrypts plaintext with a random salt+IV each time (so the same message never looks the same twice). */
+    /**
+     * Encrypts plaintext with a random salt+IV each time (so the same message never looks the
+     * same twice). This does real cryptographic work (PBKDF2) and can take noticeable time on
+     * slower devices -- callers should run this off the main thread.
+     */
     fun encrypt(plaintext: String, passphrase: String): String {
         val random = SecureRandom()
         val salt = ByteArray(SALT_LENGTH_BYTES).also { random.nextBytes(it) }
@@ -47,18 +58,19 @@ object AesEngine {
         cipher.init(Cipher.ENCRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
         val ciphertext = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
         val combined = salt + iv + ciphertext
-        return PREFIX + Base64.encodeToString(combined, Base64.NO_WRAP)
+        return PREFIX + Base64.encodeToString(combined, BASE64_FLAGS)
     }
 
     /**
      * Returns null if the passphrase is wrong or the payload is corrupt/tampered -- GCM's
      * built-in authentication tag makes both cases fail cleanly instead of returning garbage,
      * so a null result reliably means "wrong passphrase or bad data," not silent corruption.
+     * Also does real cryptographic work -- run off the main thread.
      */
     fun decrypt(payload: String, passphrase: String): String? {
         if (!payload.startsWith(PREFIX)) return null
         return try {
-            val combined = Base64.decode(payload.removePrefix(PREFIX), Base64.NO_WRAP)
+            val combined = Base64.decode(payload.removePrefix(PREFIX), BASE64_FLAGS)
             if (combined.size < SALT_LENGTH_BYTES + IV_LENGTH_BYTES) return null
             val salt = combined.copyOfRange(0, SALT_LENGTH_BYTES)
             val iv = combined.copyOfRange(SALT_LENGTH_BYTES, SALT_LENGTH_BYTES + IV_LENGTH_BYTES)
