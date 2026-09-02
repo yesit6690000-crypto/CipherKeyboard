@@ -90,6 +90,12 @@ class CipherIME : InputMethodService() {
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
+        // This is the one true place composing should reset -- a genuinely new typing session
+        // (a different field, a different app). It must NOT reset on every keyboard redraw
+        // (mode switches, shift, etc.) -- that was wiping the in-progress message every time you
+        // touched punctuation or switched modes, which is why AES-encrypted messages were
+        // missing everything except whatever was typed after the last mode switch.
+        composing = StringBuilder()
         // Android blocks background apps from reading the clipboard (privacy rule since Android 10),
         // so the most reliable "live" moment is right when you come back to type -- check here too.
         maybeAutoOfferDecode()
@@ -117,7 +123,6 @@ class CipherIME : InputMethodService() {
     }
 
     private fun buildFullKeyboardView(): View {
-        composing = StringBuilder()
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.BLACK)
@@ -170,32 +175,71 @@ class CipherIME : InputMethodService() {
         return row
     }
 
-    /** Small status strip shown in AES mode instead of the substitution-cipher recheck bar. */
+    /** AES mode's version of the recheck bar -- same live preview, same eye/hide toggle, same
+     *  refresh button as the normal cipher mode, just with an extra line reminding you to Encrypt
+     *  before sending. This used to be a static status label with no way to see or hide what
+     *  you'd actually typed -- that's fixed now. */
     private fun buildAesStatusRow(): View {
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+        val hasPassphrase = !getStoredPassphrase().isNullOrEmpty()
+        col.addView(TextView(this).apply {
+            text = if (hasPassphrase) "AES mode -- tap Encrypt before sending" else "AES mode -- set a shared passphrase first (tap Key)"
+            setTextColor(if (hasPassphrase) Color.parseColor("#666666") else Color.parseColor("#E8763C"))
+            textSize = 11f
+            isSingleLine = true
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(dp(4), 0, dp(4), dp(3))
+        })
+
         val row = FrameLayout(this).apply {
             background = android.graphics.drawable.GradientDrawable().apply {
                 cornerRadius = dp(10).toFloat()
                 setColor(Color.parseColor("#161616"))
             }
             setPadding(dp(12), dp(8), dp(10), dp(8))
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(38)
-            ).also { it.topMargin = dp(6) }
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(38))
         }
-        val hasPassphrase = !getStoredPassphrase().isNullOrEmpty()
-        row.addView(TextView(this).apply {
-            text = if (hasPassphrase) {
-                "AES mode -- typing plain text. Tap Encrypt before sending."
-            } else {
-                "AES mode -- set a shared passphrase first (tap Key)"
-            }
-            setTextColor(if (hasPassphrase) Color.parseColor("#888888") else Color.parseColor("#E8763C"))
-            textSize = 12f
+        previewText = TextView(this).apply {
+            setTextColor(Color.parseColor("#888888"))
+            textSize = 15f
             isSingleLine = true
-            ellipsize = android.text.TextUtils.TruncateAt.END
+            ellipsize = android.text.TextUtils.TruncateAt.START
             gravity = Gravity.START or Gravity.CENTER_VERTICAL
-        })
-        return row
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+            ).also { it.rightMargin = dp(70) }
+        }
+        row.addView(previewText)
+        updatePreviewText()
+
+        val recheckBtn = TextView(this).apply {
+            text = "\u21BB"
+            setTextColor(Color.parseColor("#999999"))
+            textSize = 18f
+            gravity = Gravity.CENTER
+            layoutParams = FrameLayout.LayoutParams(dp(34), dp(34)).also {
+                it.gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                it.rightMargin = dp(38)
+            }
+            setOnClickListener { refreshPreviewNow() }
+        }
+        row.addView(recheckBtn)
+
+        eyeIcon = TextView(this).apply {
+            text = "\u25CF"
+            setTextColor(Color.parseColor("#999999"))
+            textSize = 16f
+            gravity = Gravity.CENTER
+            layoutParams = FrameLayout.LayoutParams(dp(34), dp(34)).also {
+                it.gravity = Gravity.END or Gravity.CENTER_VERTICAL
+            }
+            setOnClickListener { togglePreviewVisibility() }
+        }
+        row.addView(eyeIcon)
+        col.addView(row)
+
+        return col
     }
 
     private fun getStoredPassphrase(): String? {
