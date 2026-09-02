@@ -21,10 +21,10 @@ import javax.crypto.spec.SecretKeySpec
  */
 object AesEngine {
     private const val PREFIX = "CK1:"
-    // 60k iterations instead of 120k -- still far beyond what a substitution cipher offers,
-    // but noticeably faster on mid-range phones. Combined with running this off the main
-    // thread (see CipherIME), Encrypt/Decode should feel close to instant now.
-    private const val PBKDF2_ITERATIONS = 60_000
+    // 45k iterations -- trimmed down again from 60k for a snappier feel. Still meaningfully more
+    // resistant to brute-forcing than skipping PBKDF2 entirely; combined with running this off
+    // the main thread, Encrypt/Decode should feel closer to instant now.
+    private const val PBKDF2_ITERATIONS = 45_000
     private const val KEY_LENGTH_BITS = 256
     private const val GCM_TAG_LENGTH_BITS = 128
     private const val SALT_LENGTH_BYTES = 16

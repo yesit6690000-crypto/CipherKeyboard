@@ -187,7 +187,7 @@ class CipherIME : InputMethodService() {
 
         val hasPassphrase = !getStoredPassphrase().isNullOrEmpty()
         col.addView(TextView(this).apply {
-            text = if (hasPassphrase) "AES mode -- tap Encrypt before sending" else "AES mode -- set a shared passphrase first (tap Key)"
+            text = if (hasPassphrase) "AES mode -- typing is hidden (dots), auto-encrypts on Send" else "AES mode -- set a shared passphrase first (tap Key)"
             setTextColor(if (hasPassphrase) Color.parseColor("#666666") else Color.parseColor("#E8763C"))
             textSize = 11f
             isSingleLine = true
@@ -485,7 +485,7 @@ class CipherIME : InputMethodService() {
                 it.marginStart = dp(2); it.marginEnd = dp(2)
                 it.topMargin = dp(2); it.bottomMargin = dp(2)
             }
-            setOnClickListener { commitPlain(" ") }
+            setOnClickListener { if (aesMode) commitMaskedForAes(" ") else commitPlain(" ") }
         }
         row.addView(space)
         row.addView(controlKey("\u21B5", weight = 1.4f, accent = true) { sendEnter() })
@@ -741,9 +741,10 @@ class CipherIME : InputMethodService() {
         frame.setOnClickListener { view ->
             val outLabel = plainChar.toString().let { if (capsOn) it.uppercase() else it }
             if (aesMode) {
-                // AES mode types real plain text -- the whole point is to encrypt the readable
-                // message as a single block, not scramble individual letters as you go.
-                commitPlain(outLabel)
+                // Mask what actually appears in the chat's text field -- someone glancing at your
+                // screen sees dots, not your words. The real letter still goes into `composing`
+                // behind the scenes, ready to be AES-encrypted as a whole message on Send.
+                commitMaskedForAes(outLabel)
                 showKeyPreview(view, outLabel)
             } else {
                 val outChar = CipherEngine.letterEncodeMap[plainChar] ?: plainChar
@@ -780,7 +781,7 @@ class CipherIME : InputMethodService() {
         }
         frame.setOnClickListener { view ->
             if (aesMode) {
-                commitPlain(digitChar.toString())
+                commitMaskedForAes(digitChar.toString())
             } else {
                 commitCipherChar(cipherChar, digitChar.toString())
             }
@@ -848,7 +849,7 @@ class CipherIME : InputMethodService() {
             textSize = 17f
             background = greyKeyBackground()
             layoutParams = keyMargins(weight)
-            setOnClickListener { commitPlain(c.toString()) }
+            setOnClickListener { if (aesMode) commitMaskedForAes(c.toString()) else commitPlain(c.toString()) }
         }
         return btn
     }
@@ -949,6 +950,22 @@ class CipherIME : InputMethodService() {
             currentInputConnection?.commitText(text, 1)
         } catch (e: Exception) { /* target field rejected the commit -- ignore rather than crash */ }
         composing.append(text)
+        updatePreviewText()
+    }
+
+    /**
+     * Used by AES mode's keys instead of commitPlain: commits a mask character (dot) to the
+     * visible field instead of the real letter, while the real letter still goes into `composing`
+     * behind the scenes for later encryption. This is what stops someone glancing at your screen
+     * from reading your message as you type it -- real AES can't be encrypted incrementally
+     * letter-by-letter (the whole message has to be processed as one block to be secure), so
+     * masking what's on screen is what actually delivers "nobody can shoulder-surf this."
+     */
+    private fun commitMaskedForAes(realText: String) {
+        try {
+            currentInputConnection?.commitText("\u2022".repeat(realText.length), 1)
+        } catch (e: Exception) { /* target field rejected the commit -- ignore rather than crash */ }
+        composing.append(realText)
         updatePreviewText()
     }
 
