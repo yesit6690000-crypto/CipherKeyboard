@@ -88,8 +88,11 @@ class CipherIME : InputMethodService() {
         keyboardRootView = null
     }
 
+    private var currentEditorInfo: EditorInfo? = null
+
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
+        currentEditorInfo = info
         // This is the one true place composing should reset -- a genuinely new typing session
         // (a different field, a different app). It must NOT reset on every keyboard redraw
         // (mode switches, shift, etc.) -- that was wiping the in-progress message every time you
@@ -275,20 +278,20 @@ class CipherIME : InputMethodService() {
      * resulting AES ciphertext -- this is a whole-message operation, not per-keystroke, since AES
      * doesn't work as a 1-to-1 letter substitution the way the cipher keyboard does.
      */
-    private fun encryptCurrentFieldWithAes() {
+    private fun encryptCurrentFieldWithAes(silent: Boolean = false, onEncrypted: (() -> Unit)? = null) {
         val passphrase = getStoredPassphrase()
         if (passphrase.isNullOrEmpty()) {
-            Toast.makeText(this, "Set a shared passphrase first (tap Key)", Toast.LENGTH_LONG).show()
+            if (!silent) Toast.makeText(this, "Set a shared passphrase first (tap Key)", Toast.LENGTH_LONG).show()
             return
         }
         val plaintext = composing.toString()
         if (plaintext.isBlank()) {
-            Toast.makeText(this, "Type your message first, then tap Encrypt", Toast.LENGTH_SHORT).show()
+            if (!silent) Toast.makeText(this, "Type your message first, then tap Encrypt", Toast.LENGTH_SHORT).show()
             return
         }
         val ic = currentInputConnection
         if (ic == null) {
-            Toast.makeText(this, "No text field is focused", Toast.LENGTH_SHORT).show()
+            if (!silent) Toast.makeText(this, "No text field is focused", Toast.LENGTH_SHORT).show()
             return
         }
         // The actual crypto work (PBKDF2) is deliberately slow and can take real time on a
@@ -315,7 +318,8 @@ class CipherIME : InputMethodService() {
                     ic.endBatchEdit()
                     composing = StringBuilder()
                     updatePreviewText()
-                    Toast.makeText(this, "Encrypted -- ready to send", Toast.LENGTH_SHORT).show()
+                    if (!silent) Toast.makeText(this, "Encrypted -- ready to send", Toast.LENGTH_SHORT).show()
+                    onEncrypted?.invoke()
                 } catch (e: Exception) {
                     Toast.makeText(this, "Encryption failed, nothing was changed", Toast.LENGTH_SHORT).show()
                 }
@@ -986,14 +990,35 @@ class CipherIME : InputMethodService() {
     }
 
     private fun sendEnter() {
+        // In AES mode, with real unencrypted text sitting in the field, do the encrypt-then-send
+        // as one motion -- this is what makes "type and hit send" automatically become encrypted,
+        // without a separate Encrypt tap. We can only ever hook OUR OWN Enter/Send key this way --
+        // there's no way for a keyboard to intercept another app's own on-screen send button.
+        if (aesMode && composing.isNotBlank() && !getStoredPassphrase().isNullOrEmpty()) {
+            encryptCurrentFieldWithAes(silent = true) { performActualSend() }
+            return
+        }
+        performActualSend()
+    }
+
+    private fun performActualSend() {
         try {
-            currentInputConnection?.sendKeyEvent(
-                android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_ENTER)
+            val ic = currentInputConnection
+            val actionId = currentEditorInfo?.actionId ?: EditorInfo.IME_ACTION_NONE
+            // Prefer the field's own declared action (IME_ACTION_SEND etc.) -- this is what chat
+            // apps actually use for their send button, so triggering it directly is more reliable
+            // than simulating an Enter keypress, which some apps treat as "new line" instead.
+            val sendableActions = setOf(
+                EditorInfo.IME_ACTION_SEND, EditorInfo.IME_ACTION_DONE,
+                EditorInfo.IME_ACTION_GO, EditorInfo.IME_ACTION_NEXT
             )
-            currentInputConnection?.sendKeyEvent(
-                android.view.KeyEvent(android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_ENTER)
-            )
-        } catch (e: Exception) { /* target app rejected the key event -- ignore rather than crash */ }
+            if (ic != null && actionId in sendableActions) {
+                ic.performEditorAction(actionId)
+            } else {
+                ic?.sendKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_ENTER))
+                ic?.sendKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_ENTER))
+            }
+        } catch (e: Exception) { /* target app rejected the send -- ignore rather than crash */ }
         composing.clear()
         updatePreviewText()
     }
