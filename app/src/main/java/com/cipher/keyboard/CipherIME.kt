@@ -380,17 +380,35 @@ class CipherIME : InputMethodService() {
         return row
     }
 
+    // Letters that need their displayed case updated when Shift toggles -- tracked so Shift can
+    // update them directly instead of rebuilding the entire keyboard (every key, every popup
+    // reference, torn down and recreated). That rebuild was expensive enough to cause real lag
+    // and occasionally drop a fast tap that landed mid-rebuild -- especially painful in AES mode,
+    // where real English capitalization means Shift gets used constantly.
+    private val capsUpdatableViews = mutableListOf<Pair<TextView, Char>>()
+    private var shiftKeyView: Button? = null
+
+    private fun updateCapsDisplay() {
+        for ((view, plainChar) in capsUpdatableViews) {
+            view.text = (if (capsOn) plainChar.uppercaseChar() else plainChar).toString()
+        }
+        shiftKeyView?.text = if (capsOn) "\u21E7\u21E7" else "\u21E7"
+    }
+
     private fun buildLetterRows(): View {
+        capsUpdatableViews.clear()
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
         col.addView(keyRow(CipherEngine.row1Plain.toCharArray().toList()))
         col.addView(keyRow(CipherEngine.row2Plain.toCharArray().toList(), sidePad = dp(16)))
 
         val lastRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        lastRow.addView(controlKey(if (capsOn) "\u21E7\u21E7" else "\u21E7", weight = 1.4f) {
+        val shiftBtn = controlKey(if (capsOn) "\u21E7\u21E7" else "\u21E7", weight = 1.4f) {
             capsOn = !capsOn
-            refreshKeyboardView()
-        })
+            updateCapsDisplay() // direct update, no full rebuild
+        }
+        shiftKeyView = shiftBtn as? Button
+        lastRow.addView(shiftBtn)
         for (c in CipherEngine.row3Plain) {
             lastRow.addView(letterKey(c, weight = 1f))
         }
@@ -727,8 +745,10 @@ class CipherIME : InputMethodService() {
             layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         }
         frame.addView(mainLabel)
-        if (!aesMode) {
-            frame.addView(TextView(this).apply {
+        if (aesMode) {
+            capsUpdatableViews.add(mainLabel to plainChar)
+        } else {
+            val cornerHint = TextView(this).apply {
                 text = shown.toString()
                 setTextColor(Color.parseColor("#5A5A5A"))
                 textSize = 9f
@@ -736,7 +756,9 @@ class CipherIME : InputMethodService() {
                     it.gravity = Gravity.TOP or Gravity.END
                     it.topMargin = dp(3); it.rightMargin = dp(4)
                 }
-            })
+            }
+            frame.addView(cornerHint)
+            capsUpdatableViews.add(cornerHint to plainChar)
         }
         frame.setOnClickListener { view ->
             val outLabel = plainChar.toString().let { if (capsOn) it.uppercase() else it }
@@ -1171,38 +1193,55 @@ class CipherIME : InputMethodService() {
         }
     }
 
+    /**
+     * Copying more than one message at once (multi-select in WhatsApp) joins them with newlines
+     * into a single clipboard string -- trying to decrypt/decode that whole blob as ONE message
+     * always failed. This processes each line independently instead, so "copy several messages,
+     * tap Decode once" now actually decodes all of them together.
+     */
+    private fun decodeAllLines(text: String, passphrase: String?): String {
+        return text.split("\n").joinToString("\n") { rawLine ->
+            val line = rawLine.trim()
+            when {
+                line.isEmpty() -> ""
+                AesEngine.looksEncrypted(line) -> {
+                    if (passphrase.isNullOrEmpty()) {
+                        "[AES-encrypted -- set a passphrase first]"
+                    } else {
+                        AesEngine.decrypt(line, passphrase) ?: "[couldn't decrypt this line -- passphrase mismatch?]"
+                    }
+                }
+                CipherEngine.looksEncoded(line) -> CipherEngine.decode(line)
+                else -> line // plain text mixed in (e.g. a sender name) -- leave it untouched
+            }
+        }
+    }
+
+    private fun clipboardHasDecodableContent(text: String): Boolean {
+        return text.split("\n").any {
+            val line = it.trim()
+            AesEngine.looksEncrypted(line) || CipherEngine.looksEncoded(line)
+        }
+    }
+
     private fun showDecodePopup() {
         val text = readClipboardText()
         if (text.isEmpty()) {
             Toast.makeText(this, "Clipboard is empty. Copy their encoded text first.", Toast.LENGTH_SHORT).show()
             return
         }
-        if (AesEngine.looksEncrypted(text)) {
-            val passphrase = getStoredPassphrase()
-            if (passphrase.isNullOrEmpty()) {
-                Toast.makeText(this, "This is AES-encrypted -- set your shared passphrase first (tap Key)", Toast.LENGTH_LONG).show()
-                return
-            }
-            lastSeenClip = text
-            // Off the main thread -- same PBKDF2 cost as encrypt, same reason to not block the UI.
-            Thread {
-                val decoded = AesEngine.decrypt(text, passphrase)
-                repeatHandler.post {
-                    if (decoded == null) {
-                        Toast.makeText(this, "Couldn't decrypt -- check the passphrase matches exactly on both sides", Toast.LENGTH_LONG).show()
-                    } else {
-                        showDecodedDialog(decoded)
-                    }
-                }
-            }.start()
-            return
-        }
-        if (!CipherEngine.looksEncoded(text)) {
+        if (!clipboardHasDecodableContent(text)) {
             Toast.makeText(this, "Clipboard text doesn't look encoded.", Toast.LENGTH_SHORT).show()
             return
         }
         lastSeenClip = text
-        showDecodedDialog(CipherEngine.decode(text))
+        val passphrase = getStoredPassphrase()
+        // Off the main thread -- PBKDF2 runs once per AES-encrypted line found, same reason as
+        // always to not block the UI while it works.
+        Thread {
+            val result = decodeAllLines(text, passphrase)
+            repeatHandler.post { showDecodedDialog(result) }
+        }.start()
     }
 
     /**
@@ -1215,18 +1254,13 @@ class CipherIME : InputMethodService() {
     private fun maybeAutoOfferDecode() {
         val text = readClipboardText()
         if (text.isEmpty() || text == lastSeenClip) return
-        if (AesEngine.looksEncrypted(text)) {
-            val passphrase = getStoredPassphrase() ?: return // no passphrase set yet -- stay silent rather than nag on every clipboard change
-            lastSeenClip = text
-            Thread {
-                val decoded = AesEngine.decrypt(text, passphrase) ?: return@Thread // wrong passphrase -- only report that on an explicit Decode tap, not on every auto-check
-                repeatHandler.post { showDecodedDialog(decoded) }
-            }.start()
-            return
-        }
-        if (!CipherEngine.looksEncoded(text)) return
+        if (!clipboardHasDecodableContent(text)) return
         lastSeenClip = text
-        showDecodedDialog(CipherEngine.decode(text))
+        val passphrase = getStoredPassphrase()
+        Thread {
+            val result = decodeAllLines(text, passphrase)
+            repeatHandler.post { showDecodedDialog(result) }
+        }.start()
     }
 
     private fun readClipboardText(): String {
