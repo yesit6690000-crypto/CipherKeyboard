@@ -187,7 +187,7 @@ class CipherIME : InputMethodService() {
 
         val hasPassphrase = !getStoredPassphrase().isNullOrEmpty()
         col.addView(TextView(this).apply {
-            text = if (hasPassphrase) "AES mode -- typing is hidden (dots), auto-encrypts on Send" else "AES mode -- set a shared passphrase first (tap Key)"
+            text = if (hasPassphrase) "AES mode -- dots hide typing, tap \u25CF to reveal/hide, auto-encrypts on Send" else "AES mode -- set a shared passphrase first (tap Key)"
             setTextColor(if (hasPassphrase) Color.parseColor("#666666") else Color.parseColor("#E8763C"))
             textSize = 11f
             isSingleLine = true
@@ -1114,6 +1114,7 @@ class CipherIME : InputMethodService() {
             previewHidden = true
             eyeIcon.text = "\u25CF"
             updatePreviewText()
+            if (aesMode) toggleFieldMaskInAes(showReal = false) // safety net: re-mask the real field too if you forget
         }
         previewHideRunnable = r
         repeatHandler.postDelayed(r, previewAutoHideMs)
@@ -1121,7 +1122,14 @@ class CipherIME : InputMethodService() {
 
     private fun refreshPreviewNow() {
         previewHidden = false
-        syncComposingFromField()
+        if (aesMode) {
+            // In AES mode the field shows dots, not decodable cipher text -- `composing` is
+            // already the accurate source of truth, so re-reading the field would just overwrite
+            // it with garbage (the dots don't decode to anything meaningful).
+            updatePreviewText()
+        } else {
+            syncComposingFromField()
+        }
     }
 
     private fun togglePreviewVisibility() {
@@ -1130,6 +1138,31 @@ class CipherIME : InputMethodService() {
         updatePreviewText()
         if (previewHidden) {
             previewHideRunnable?.let { repeatHandler.removeCallbacks(it) }
+        }
+        if (aesMode) toggleFieldMaskInAes(showReal = !previewHidden)
+    }
+
+    /**
+     * Swaps the ACTUAL WhatsApp (or other app) text field between showing dots and showing your
+     * real typed message -- not just the small preview line above the keyboard. Lets you review
+     * or edit your message in context, then hide it again before someone glances over. Tied to
+     * the same eye button (and the same auto-hide timer) as the preview line, so there's only one
+     * control to remember.
+     */
+    private fun toggleFieldMaskInAes(showReal: Boolean) {
+        val ic = currentInputConnection ?: return
+        try {
+            val beforeLen = ic.getTextBeforeCursor(10000, 0)?.length ?: 0
+            val afterLen = ic.getTextAfterCursor(10000, 0)?.length ?: 0
+            if (beforeLen == 0 && afterLen == 0) return // nothing typed yet, nothing to swap
+            val replacement = if (showReal) composing.toString() else "\u2022".repeat(composing.length)
+            ic.beginBatchEdit()
+            ic.deleteSurroundingText(beforeLen, afterLen)
+            ic.commitText(replacement, 1)
+            ic.endBatchEdit()
+        } catch (e: Exception) {
+            // Best effort -- if the field is in an unexpected state, leave it alone rather than
+            // risk mangling whatever the user has typed.
         }
     }
 
