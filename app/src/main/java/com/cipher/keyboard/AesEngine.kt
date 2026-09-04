@@ -20,7 +20,9 @@ import javax.crypto.spec.SecretKeySpec
  * there's no way to recover a message encrypted with a passphrase you don't have.
  */
 object AesEngine {
-    private const val PREFIX = "CK1:"
+    // Public so CipherIME can search for this marker inside a line (e.g. when WhatsApp prepends
+    // a timestamp/sender name to each copied message), not just check startsWith.
+    const val PREFIX = "CK1:"
     // 45k iterations -- trimmed down again from 60k for a snappier feel. Still meaningfully more
     // resistant to brute-forcing than skipping PBKDF2 entirely; combined with running this off
     // the main thread, Encrypt/Decode should feel closer to instant now.

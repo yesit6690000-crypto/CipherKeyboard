@@ -1231,21 +1231,29 @@ class CipherIME : InputMethodService() {
      * into a single clipboard string -- trying to decrypt/decode that whole blob as ONE message
      * always failed. This processes each line independently instead, so "copy several messages,
      * tap Decode once" now actually decodes all of them together.
+     *
+     * WhatsApp (and other apps) sometimes prepend a timestamp/sender name to each copied line
+     * (e.g. "[6:45 AM] Sultan: CK1:..."), so we search for the CK1: marker anywhere in the line
+     * rather than requiring it at the very start, and keep whatever came before it intact.
      */
     private fun decodeAllLines(text: String, passphrase: String?): String {
         return text.split("\n").joinToString("\n") { rawLine ->
             val line = rawLine.trim()
+            val aesIndex = line.indexOf(AesEngine.PREFIX)
             when {
                 line.isEmpty() -> ""
-                AesEngine.looksEncrypted(line) -> {
-                    if (passphrase.isNullOrEmpty()) {
+                aesIndex != -1 -> {
+                    val leadingLabel = line.substring(0, aesIndex) // e.g. "[6:45 AM] Sultan: " -- kept as-is
+                    val payload = line.substring(aesIndex).trim()
+                    val decrypted = if (passphrase.isNullOrEmpty()) {
                         "[AES-encrypted -- set a passphrase first]"
                     } else {
-                        AesEngine.decrypt(line, passphrase) ?: "[couldn't decrypt this line -- passphrase mismatch?]"
+                        AesEngine.decrypt(payload, passphrase) ?: "[couldn't decrypt this line -- passphrase mismatch?]"
                     }
+                    leadingLabel + decrypted
                 }
                 CipherEngine.looksEncoded(line) -> CipherEngine.decode(line)
-                else -> line // plain text mixed in (e.g. a sender name) -- leave it untouched
+                else -> line // plain text mixed in (e.g. a sender name on its own line) -- leave it untouched
             }
         }
     }
@@ -1253,7 +1261,7 @@ class CipherIME : InputMethodService() {
     private fun clipboardHasDecodableContent(text: String): Boolean {
         return text.split("\n").any {
             val line = it.trim()
-            AesEngine.looksEncrypted(line) || CipherEngine.looksEncoded(line)
+            line.contains(AesEngine.PREFIX) || CipherEngine.looksEncoded(line)
         }
     }
 
