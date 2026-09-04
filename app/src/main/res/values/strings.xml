@@ -1,5 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Cipher Keyboard</string>
-    <string name="accessibility_service_description">Lets Cipher Keyboard tap the Send button in your messaging app right after encrypting a message, so you don\'t need a separate tap. It only looks for a Send-labeled button at that moment and does not read, log, or store anything else on your screen.</string>
 </resources>
